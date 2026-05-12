@@ -30,13 +30,15 @@ ICP_VOXELS = (1.0, 0.4, 0.1, 0.05, 0.01)
 
 # ---------- I/O ----------
 
-def list_pts_files(dataset: str) -> list[dict]:
-    """List .pts files in a dataset folder with preprocessing status."""
+def list_scan_files(dataset: str) -> list[dict]:
+    """List raw scan files (.ply, excluding *_simple.ply) in a dataset folder."""
     folder = DATA_ROOT / dataset
     if not folder.is_dir():
         return []
     rows = []
-    for p in sorted(folder.glob("*.pts")):
+    for p in sorted(folder.glob("*.ply")):
+        if p.stem.endswith("_simple"):
+            continue  # skip downsampled files
         stem = p.stem
         simple = folder / f"{stem}_simple.ply"
         meta = folder / f"{stem}_meta.json"
@@ -51,40 +53,26 @@ def list_pts_files(dataset: str) -> list[dict]:
             "has_meta": meta.exists(),
             "has_rgb": rgb.exists(),
         })
-    # Sort by date prefix in filename (e.g. 20260508)
     rows.sort(key=lambda r: r["stem"])
     return rows
 
 
-def load_pts(path: Path, with_rgb: bool = False) -> o3d.geometry.PointCloud:
-    """Load .pts (first line = count, then 'x y z intensity r g b' rows).
-
-    When `with_rgb=True`, also reads the per-point RGB (0-255 ints) and stores
-    them as Open3D colors in [0,1].
-    """
-    cols = [0, 1, 2] if not with_rgb else [0, 1, 2, 4, 5, 6]
-    df = pd.read_csv(
-        path, sep=r"\s+", skiprows=1, header=None,
-        usecols=cols, dtype=np.float32, engine="c",
-    )
-    pts = df.iloc[:, :3].to_numpy().astype(np.float64)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts)
-    if with_rgb:
-        rgb = df.iloc[:, 3:6].to_numpy().astype(np.float64) / 255.0
-        rgb = np.clip(rgb, 0.0, 1.0)
-        pcd.colors = o3d.utility.Vector3dVector(rgb)
+def load_scan(path: Path, with_rgb: bool = False) -> o3d.geometry.PointCloud:
+    """Load a raw scan PLY file via Open3D."""
+    pcd = o3d.io.read_point_cloud(str(path))
+    if not with_rgb and pcd.has_colors():
+        pcd.colors = o3d.utility.Vector3dVector()  # discard to save memory
     return pcd
 
 
-def load_pts_xyz_rgb_arrays(path: Path):
-    """Faster array-only loader for RGB back-fill of an existing simple cloud."""
-    df = pd.read_csv(
-        path, sep=r"\s+", skiprows=1, header=None,
-        usecols=[0, 1, 2, 4, 5, 6], dtype=np.float32, engine="c",
-    )
-    xyz = df.iloc[:, :3].to_numpy().astype(np.float64)
-    rgb = np.clip(df.iloc[:, 3:6].to_numpy(), 0, 255).astype(np.uint8)
+def load_scan_xyz_rgb_arrays(path: Path):
+    """Load PLY and return (xyz float64, rgb uint8) arrays."""
+    pcd = o3d.io.read_point_cloud(str(path))
+    xyz = np.asarray(pcd.points, dtype=np.float64)
+    if pcd.has_colors():
+        rgb = (np.asarray(pcd.colors) * 255.0).clip(0, 255).astype(np.uint8)
+    else:
+        rgb = np.zeros((len(xyz), 3), dtype=np.uint8)
     return xyz, rgb
 
 
@@ -239,7 +227,7 @@ def compute_displacement(current_simple: o3d.geometry.PointCloud,
 
 def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
     """Run the full preprocess pipeline for `target_file` against the oldest
-    .pts in the dataset folder.
+    scan .ply in the dataset folder.
 
     `progress(stage:str, detail:str)` is called periodically for UI updates.
     """
@@ -252,9 +240,9 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
     if not target_path.is_file():
         raise FileNotFoundError(target_path)
 
-    listing = list_pts_files(dataset)
+    listing = list_scan_files(dataset)
     if not listing:
-        raise RuntimeError(f"No .pts files in {folder}")
+        raise RuntimeError(f"No scan .ply files in {folder}")
     ref_entry = listing[0]
     ref_path = folder / ref_entry["name"]
     is_reference = (target_path.name == ref_path.name)
@@ -268,7 +256,7 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
     if not ref_simple_path.exists():
         _p("load_ref", str(ref_path.name))
         s = time.time()
-        ref_pcd_full = load_pts(ref_path, with_rgb=True)
+        ref_pcd_full = load_scan(ref_path, with_rgb=True)
         timing["load_ref"] = time.time() - s
 
         _p("downsample_ref", f"{len(ref_pcd_full.points):,} pts")
@@ -310,7 +298,7 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
     tgt_simple_path = folder / f"{tgt_stem}_simple.ply"
     _p("load_target", str(target_path.name))
     s = time.time()
-    tgt_pcd_full = load_pts(target_path, with_rgb=True)
+    tgt_pcd_full = load_scan(target_path, with_rgb=True)
     timing["load_target"] = time.time() - s
 
     _p("downsample_target", f"{len(tgt_pcd_full.points):,} pts")
@@ -329,7 +317,7 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
     if ref_pcd_full is None:
         _p("load_ref_full", str(ref_path.name))
         s = time.time()
-        ref_pcd_full = load_pts(ref_path)
+        ref_pcd_full = load_scan(ref_path)
         timing["load_ref_full"] = time.time() - s
 
     # --- Global registration (FGR) on the *_simple clouds ---
@@ -404,22 +392,22 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
 
 def extract_rgb_for_simple(dataset: str, stem: str) -> Path:
     """Back-fill per-point RGB for an existing *_simple.ply by nearest-neighbor
-    lookup in the original .pts. Writes *_rgb.bin (N x 3 uint8) and returns
+    lookup in the original scan .ply. Writes *_rgb.bin (N x 3 uint8) and returns
     the path. No-op if the file already exists.
 
     Handles the case where the simple cloud has been transformed by ICP: we
     inverse-transform it back to source frame before the NN query.
     """
     folder = DATA_ROOT / dataset
-    pts_path = folder / f"{stem}.pts"
+    scan_path = folder / f"{stem}.ply"
     simple_path = folder / f"{stem}_simple.ply"
     rgb_path = folder / f"{stem}_rgb.bin"
     meta_path = folder / f"{stem}_meta.json"
 
     if rgb_path.exists():
         return rgb_path
-    if not pts_path.is_file():
-        raise FileNotFoundError(pts_path)
+    if not scan_path.is_file():
+        raise FileNotFoundError(scan_path)
     if not simple_path.is_file():
         raise FileNotFoundError(simple_path)
 
@@ -440,7 +428,7 @@ def extract_rgb_for_simple(dataset: str, stem: str) -> Path:
         sxyz_h = np.hstack([sxyz, ones]) @ Tinv.T
         sxyz = sxyz_h[:, :3]
 
-    xyz, rgb = load_pts_xyz_rgb_arrays(pts_path)
+    xyz, rgb = load_scan_xyz_rgb_arrays(scan_path)
     tree = cKDTree(xyz)
     _, idx = tree.query(sxyz, k=1, workers=-1)
     out = rgb[idx]  # (N, 3) uint8

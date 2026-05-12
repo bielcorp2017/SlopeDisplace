@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -23,6 +26,20 @@ from . import pipeline
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_ROOT / "web"
 DATA_ROOT = pipeline.DATA_ROOT
+
+# C++ preprocessor: look for slope_preprocess executable
+_CPP_EXE = os.environ.get("SLOPE_CPP_EXE", "")
+if not _CPP_EXE:
+    # Auto-detect common build locations
+    for candidate in [
+        PROJECT_ROOT / "cpp" / "build" / "Release" / "slope_preprocess.exe",
+        PROJECT_ROOT / "cpp" / "build" / "slope_preprocess.exe",
+        PROJECT_ROOT / "cpp" / "build" / "Debug" / "slope_preprocess.exe",
+        PROJECT_ROOT / "cpp" / "build" / "slope_preprocess",
+    ]:
+        if candidate.is_file():
+            _CPP_EXE = str(candidate)
+            break
 
 app = FastAPI(title="Slope Displacement Viewer")
 
@@ -63,7 +80,7 @@ def list_datasets():
 
 @app.get("/api/files")
 def list_files(dataset: str):
-    rows = pipeline.list_pts_files(dataset)
+    rows = pipeline.list_scan_files(dataset)
     if not rows:
         return {"dataset": dataset, "files": [], "reference": None}
     # The first (oldest by filename) is the reference.
@@ -97,7 +114,7 @@ def get_disp(dataset: str, stem: str):
 @app.get("/api/rgb/{dataset}/{stem}")
 def get_rgb(dataset: str, stem: str):
     """Original per-point RGB for the simple cloud. Generated lazily from the
-    source .pts via nearest-neighbor lookup if the cache doesn't exist."""
+    source .ply via nearest-neighbor lookup if the cache doesn't exist."""
     folder = DATA_ROOT / dataset
     rgb_path = folder / f"{stem}_rgb.bin"
     if not rgb_path.exists():
@@ -119,7 +136,38 @@ def start_preprocess(dataset: str, filename: str):
     def progress(stage: str, detail: str = ""):
         _update_job(jid, stage=stage, detail=detail)
 
-    def worker():
+    def worker_cpp():
+        """Run C++ preprocessor as subprocess, parse JSON-line progress."""
+        try:
+            proc = subprocess.Popen(
+                [_CPP_EXE, "--dataset", dataset, "--target", filename,
+                 "--data-root", str(DATA_ROOT)],
+                stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True,
+            )
+            for line in proc.stderr:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                    _update_job(jid, stage=msg.get("stage", ""),
+                                detail=msg.get("detail", ""))
+                except json.JSONDecodeError:
+                    _update_job(jid, detail=line)
+            rc = proc.wait()
+            if rc != 0:
+                _update_job(jid, status="error", stage="error",
+                            detail=f"exit code {rc}", finished=time.time(),
+                            error=f"C++ preprocessor exited with code {rc}")
+            else:
+                _update_job(jid, status="done", stage="done", detail="",
+                            finished=time.time())
+        except Exception as e:
+            _update_job(jid, status="error", stage="error",
+                        detail=str(e), finished=time.time(), error=str(e))
+
+    def worker_python():
+        """Fallback: run Python pipeline."""
         try:
             result = pipeline.preprocess(dataset, filename, progress=progress)
             _update_job(
@@ -140,6 +188,7 @@ def start_preprocess(dataset: str, filename: str):
                 error=str(e),
             )
 
+    worker = worker_cpp if _CPP_EXE else worker_python
     threading.Thread(target=worker, daemon=True).start()
     return {"job_id": jid}
 

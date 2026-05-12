@@ -6,3 +6,6 @@ venv/
 data/CH2_RETAINWALL/
 claude.exe
 .claude/
+cpp/build/
+cpp/open3d/
+cpp/*.zip
