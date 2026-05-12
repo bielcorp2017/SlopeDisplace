@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>Slope Displacement Viewer</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel2: #1d222c;
+    --border: #2a3140;
+    --text: #e6e8eb;
+    --text-dim: #98a0ad;
+    --accent: #4ea1ff;
+    --ok: #4ade80;
+    --warn: #facc15;
+    --err: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: grid; grid-template-columns: 360px 1fr; grid-template-rows: 100vh;
+    height: 100vh; width: 100vw; overflow: hidden;
+  }
+  .left {
+    background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .left header {
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .left header h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  .left header select {
+    margin-left: auto; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px;
+  }
+  .filelist { overflow: auto; flex: 1; }
+  table.files { width: 100%; border-collapse: collapse; }
+  table.files th, table.files td {
+    padding: 8px 10px; font-size: 12px; text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  table.files th { color: var(--text-dim); font-weight: 500; background: var(--panel2); position: sticky; top: 0; }
+  table.files tr.row { cursor: pointer; }
+  table.files tr.row:hover { background: #1b2230; }
+  table.files tr.row.selected { background: #223149; }
+  table.files tr.row.ref td:first-child::before {
+    content: "★ "; color: var(--warn); margin-right: 2px;
+  }
+  .status { font-size: 11px; color: var(--text-dim); }
+  .status.ok { color: var(--ok); }
+  .status.warn { color: var(--warn); }
+  button.pre {
+    font-size: 11px; padding: 3px 8px; border-radius: 4px;
+    border: 1px solid var(--accent); color: var(--accent); background: transparent;
+    cursor: pointer; white-space: nowrap;
+  }
+  button.pre:hover { background: rgba(78,161,255,.12); }
+  button.pre:disabled { opacity: .5; cursor: default; }
+  .joblog {
+    padding: 10px 14px; border-top: 1px solid var(--border); font-size: 11px;
+    color: var(--text-dim); max-height: 160px; overflow: auto; background: var(--panel2);
+  }
+  .joblog .line { font-family: ui-monospace, monospace; padding: 1px 0; }
+  .joblog .line .ts { color: #5b6577; margin-right: 6px; }
+  .joblog .line.err { color: var(--err); }
+  .joblog .line.ok { color: var(--ok); }
+
+  /* Right side - viewer */
+  .right { position: relative; min-width: 0; min-height: 0; }
+  #canvas { position: absolute; inset: 0; display: block; }
+  .topbar {
+    position: absolute; top: 10px; left: 10px; right: 10px; display: flex;
+    gap: 10px; align-items: center; pointer-events: none;
+  }
+  .panel {
+    background: rgba(22,26,34,.92); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 12px; pointer-events: auto;
+    backdrop-filter: blur(6px);
+  }
+  .modes { display: flex; gap: 4px; }
+  .modes button {
+    background: var(--panel2); color: var(--text-dim);
+    border: 1px solid var(--border); border-radius: 4px; padding: 5px 10px;
+    cursor: pointer; font-size: 12px;
+  }
+  .modes button.active { color: var(--text); border-color: var(--accent); background: rgba(78,161,255,.15); }
+  .clamp { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .clamp input[type=range] { width: 140px; accent-color: var(--accent); }
+  .clamp .val { font-family: ui-monospace, monospace; min-width: 64px; text-align: right; }
+  .pointsize { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .pointsize input[type=range] { width: 80px; accent-color: var(--accent); }
+
+  .legend {
+    position: absolute; right: 12px; bottom: 12px;
+    background: rgba(22,26,34,.92); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; font-size: 11px;
+    pointer-events: auto; min-width: 180px;
+  }
+  .legend .title { color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
+  .legend .bar { height: 14px; border-radius: 3px; margin-bottom: 4px; }
+  .legend .ticks { display: flex; justify-content: space-between; font-family: ui-monospace, monospace; }
+
+  .stats {
+    position: absolute; left: 12px; bottom: 12px;
+    background: rgba(22,26,34,.92); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; font-size: 11px;
+    pointer-events: auto; min-width: 220px;
+  }
+  .stats .title { color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
+  .stats table { border-collapse: collapse; }
+  .stats td { padding: 1px 8px 1px 0; font-family: ui-monospace, monospace; }
+  .stats td.k { color: var(--text-dim); }
+
+  .empty { color: var(--text-dim); padding: 20px; text-align: center; font-size: 12px; }
+
+  .spinner {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    border: 2px solid rgba(78,161,255,.3); border-top-color: var(--accent);
+    animation: spin .8s linear infinite; vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<aside class="left">
+  <header>
+    <h1>Slope Displacement</h1>
+    <select id="dataset"></select>
+    <button id="refresh" title="파일 목록 새로고침" style="margin-left:4px;padding:2px 8px;cursor:pointer;">↻</button>
+  </header>
+  <div class="filelist">
+    <table class="files">
+      <thead><tr><th>파일</th><th>크기</th><th>상태</th><th></th></tr></thead>
+      <tbody id="files"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">데이터 없음</div>
+  </div>
+  <div class="joblog" id="joblog"></div>
+</aside>
+
+<main class="right">
+  <canvas id="canvas"></canvas>
+  <div class="topbar">
+    <div class="panel modes" id="modes">
+      <button data-mode="signed_normal" title="기준 표면 법선 방향 부호 변위 (옹벽 변위 모니터링 권장)">법선 (signed)</button>
+      <button data-mode="magnitude" title="대상 점과 기준 점군 최근접점 간 유클리드 거리 (부호 없음)">최소거리</button>
+      <button data-mode="horizontal" title="수평면(XY) 변위 / 법선의 XY방향 부호 투영">수평</button>
+      <button data-mode="vertical" title="수직(Z) 변위">수직</button>
+      <button data-mode="rgb" class="active"  title="원본 스캔 RGB 색상">원본</button>
+    </div>
+    <div class="panel clamp">
+      <span>±</span>
+      <input type="range" id="clamp" min="0.005" max="0.5" step="0.005" value="0.05" />
+      <span class="val" id="clamp-val">±0.050 m</span>
+    </div>
+    <div class="panel pointsize">
+      <span>점</span>
+      <input type="range" id="psize" min="0.5" max="6" step="0.1" value="3.2" />
+    </div>
+  </div>
+  <div class="legend" id="legend">
+    <div class="title" id="legend-title">법선 변위 (m)</div>
+    <div class="bar" id="legend-bar"></div>
+    <div class="ticks" id="legend-ticks"><span>-0.050</span><span>0</span><span>+0.050</span></div>
+  </div>
+  <div class="point-tooltip" id="point-tooltip" style="display:none;position:absolute;pointer-events:none;background:rgba(0,0,0,.85);color:#eee;padding:6px 10px;border-radius:4px;font-size:12px;line-height:1.5;white-space:nowrap;z-index:10;border:1px solid rgba(255,255,255,.15);"></div>
+  <div class="stats" id="stats" style="display:none">
+    <div class="title">통계</div>
+    <table id="stats-tbl"></table>
+  </div>
+</main>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
