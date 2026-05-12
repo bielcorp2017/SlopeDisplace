@@ -42,6 +42,22 @@ controls.dampingFactor = 0.08;
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 
+// ---- Axes (50m, positioned at cloud center after loading) ----
+const axesLen = 50;
+let axesGroup = null;
+
+function updateAxes(center) {
+  if (axesGroup) scene.remove(axesGroup);
+  axesGroup = new THREE.Group();
+  const o = center || new THREE.Vector3(0, 0, 0);
+  const axMat = (c) => new THREE.LineBasicMaterial({ color: c });
+  const axLine = (pts, c) => { const g = new THREE.BufferGeometry().setFromPoints(pts); return new THREE.Line(g, axMat(c)); };
+  axesGroup.add(axLine([o.clone(), new THREE.Vector3(o.x + axesLen, o.y, o.z)], 0xff0000)); // X red
+  axesGroup.add(axLine([o.clone(), new THREE.Vector3(o.x, o.y + axesLen, o.z)], 0x00ff00)); // Y green
+  axesGroup.add(axLine([o.clone(), new THREE.Vector3(o.x, o.y, o.z + axesLen)], 0x0000ff)); // Z blue
+  scene.add(axesGroup);
+}
+
 let pointsObj = null;
 let pointsMaterial = null;
 
@@ -445,16 +461,23 @@ async function loadCloud(stem, hasDisp) {
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
   fitCameraTo(geometry.boundingSphere);
+  updateAxes(geometry.boundingBox.min.clone());
 
   recolor();
   logJob(`로딩 완료: ${n.toLocaleString()} pts`, "ok");
+
+  // Warn if registration was unreliable
+  if (metaResp && metaResp.registration_reliable === false) {
+    const fit = (metaResp.final_icp_fitness * 100).toFixed(1);
+    const angle = metaResp.fgr_rotation_deg?.toFixed(1) ?? "?";
+    logJob(`⚠ 정합 품질 낮음 (fitness ${fit}%, FGR 회전 ${angle}°) — 변위 결과가 부정확할 수 있습니다. 재전처리를 권장합니다.`, "warn");
+  }
 }
 
 function fitCameraTo(sphere) {
   if (!sphere) return;
   const c = sphere.center, r = Math.max(sphere.radius, 0.5);
-  const dir = new THREE.Vector3(-1, 0, 0.6).normalize();
-  camera.position.copy(c).addScaledVector(dir, r * 0.2);
+  camera.position.set(-50, c.y, c.z);
   controls.target.copy(c);
   camera.near = Math.max(r / 1000, 0.001);
   camera.far  = r * 100;

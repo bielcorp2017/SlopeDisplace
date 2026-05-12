@@ -107,6 +107,19 @@ def voxel_downsample_to_target(pcd: o3d.geometry.PointCloud, target: int = TARGE
 
 # ---------- Registration ----------
 
+COLOCATED_THRESHOLD = 5.0     # clouds with centers < this (m) are considered same-frame
+MAX_FGR_ROTATION_DEG = 30.0   # for co-located scans, FGR rotation > this falls back to identity
+MIN_ICP_FITNESS = 0.3         # warn if final-scale fitness is below this
+
+
+def _rotation_angle_deg(T: np.ndarray) -> float:
+    """Extract rotation angle in degrees from a 4x4 transform matrix."""
+    R = T[:3, :3]
+    trace = np.clip(np.trace(R), -1.0, 3.0)
+    angle_rad = np.arccos(np.clip((trace - 1.0) / 2.0, -1.0, 1.0))
+    return float(np.degrees(angle_rad))
+
+
 def _features(pcd: o3d.geometry.PointCloud, voxel: float):
     pcd.estimate_normals(
         o3d.geometry.KDTreeSearchParamHybrid(radius=voxel * 2.0, max_nn=30)
@@ -139,25 +152,35 @@ def multiscale_icp(src: o3d.geometry.PointCloud,
                    progress=None):
     T = np.asarray(init_T, dtype=np.float64).copy()
     history = []
+    n_scales = len(voxels)
     for i, v in enumerate(voxels):
         s = src.voxel_down_sample(v)
         t = tgt.voxel_down_sample(v)
         s.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 2.0, max_nn=30))
         t.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 2.0, max_nn=30))
+        # Coarse scales get wider correspondence search and more iterations
+        # to allow ICP to refine a rough FGR alignment.
+        if i < n_scales // 2:
+            cd = v * 4.0
+            max_iter = 200
+        else:
+            cd = v * 2.0
+            max_iter = 100
         if progress:
-            progress("icp", f"scale {i+1}/{len(voxels)}, voxel={v}m, pts={len(s.points):,}")
+            progress("icp", f"scale {i+1}/{n_scales}, voxel={v}m, cd={cd:.2f}m, pts={len(s.points):,}")
         res = o3d.pipelines.registration.registration_icp(
             s, t,
-            max_correspondence_distance=v * 2.0,
+            max_correspondence_distance=cd,
             init=T,
             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
             criteria=o3d.pipelines.registration.ICPConvergenceCriteria(
-                max_iteration=50, relative_fitness=1e-7, relative_rmse=1e-7
+                max_iteration=max_iter, relative_fitness=1e-7, relative_rmse=1e-7
             ),
         )
         T = np.asarray(res.transformation)
         entry = {
             "voxel": float(v),
+            "max_corr_dist": float(cd),
             "fitness": float(res.fitness),
             "inlier_rmse": float(res.inlier_rmse),
             "src_count": int(len(s.points)),
@@ -165,7 +188,7 @@ def multiscale_icp(src: o3d.geometry.PointCloud,
         }
         history.append(entry)
         if progress:
-            progress("icp_result", f"scale {i+1}/{len(voxels)}: fitness={res.fitness:.4f}, RMSE={res.inlier_rmse:.6f}m")
+            progress("icp_result", f"scale {i+1}/{n_scales}: fitness={res.fitness:.4f}, RMSE={res.inlier_rmse:.6f}m")
     return T, history
 
 
@@ -326,11 +349,59 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
     T0 = fgr_global(tgt_simple, ref_simple, voxel=0.2)
     timing["fgr"] = time.time() - s
 
+    fgr_angle = _rotation_angle_deg(T0)
+    ref_center = np.asarray(ref_simple.points).mean(axis=0)
+    tgt_center = np.asarray(tgt_simple.points).mean(axis=0)
+    center_dist = float(np.linalg.norm(tgt_center - ref_center))
+    colocated = center_dist < COLOCATED_THRESHOLD
+
+    # For co-located scans (same scanner frame), large rotations indicate FGR failure.
+    # For distant scans (different frames), large rotations are expected and valid.
+    if colocated and fgr_angle > MAX_FGR_ROTATION_DEG:
+        fgr_accepted = False
+        _p("fgr_rejected",
+           f"Co-located scans (center dist {center_dist:.1f}m) but FGR rotation "
+           f"{fgr_angle:.1f}° > {MAX_FGR_ROTATION_DEG}° -- falling back to identity init")
+        T0_used = np.eye(4, dtype=np.float64)
+    else:
+        fgr_accepted = True
+        _p("fgr_ok", f"FGR rotation {fgr_angle:.1f}°, center dist {center_dist:.1f}m")
+        T0_used = T0
+
     # --- Multi-scale ICP on the originals, init=T0 ---
     _p("icp", f"voxels={ICP_VOXELS}")
     s = time.time()
-    T_final, history = multiscale_icp(tgt_pcd_full, ref_pcd_full, T0, voxels=ICP_VOXELS, progress=_p)
+    T_final, history = multiscale_icp(tgt_pcd_full, ref_pcd_full, T0_used, voxels=ICP_VOXELS, progress=_p)
     timing["icp"] = time.time() - s
+
+    # --- If ICP fitness is poor and we used FGR, retry with identity init ---
+    final_fitness = history[-1]["fitness"] if history else 0.0
+    if final_fitness < MIN_ICP_FITNESS and fgr_accepted:
+        _p("icp_retry",
+           f"ICP fitness {final_fitness:.4f} < {MIN_ICP_FITNESS}, "
+           f"retrying with identity init")
+        s = time.time()
+        T_retry, history_retry = multiscale_icp(
+            tgt_pcd_full, ref_pcd_full, np.eye(4, dtype=np.float64),
+            voxels=ICP_VOXELS, progress=_p)
+        timing["icp_retry"] = time.time() - s
+        retry_fitness = history_retry[-1]["fitness"] if history_retry else 0.0
+        if retry_fitness > final_fitness:
+            _p("icp_retry_accepted",
+               f"Identity-init fitness {retry_fitness:.4f} > FGR-init {final_fitness:.4f}, using retry")
+            T_final = T_retry
+            history = history_retry
+            T0_used = np.eye(4, dtype=np.float64)
+            final_fitness = retry_fitness
+        else:
+            _p("icp_retry_rejected",
+               f"Identity-init fitness {retry_fitness:.4f} <= FGR-init {final_fitness:.4f}, keeping original")
+
+    # --- Warn if final fitness is still low ---
+    if final_fitness < MIN_ICP_FITNESS:
+        _p("warning",
+           f"Final ICP fitness {final_fitness:.4f} is below {MIN_ICP_FITNESS} -"
+           f"displacement results may be unreliable")
 
     # --- Apply T_final to both simple and full target ---
     tgt_simple_t = o3d.geometry.PointCloud(tgt_simple)
@@ -375,6 +446,12 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
         "icp_voxels": list(ICP_VOXELS),
         "icp_history": history,
         "transform_global": T0.tolist(),
+        "transform_global_used": T0_used.tolist(),
+        "fgr_rotation_deg": fgr_angle,
+        "fgr_accepted": fgr_accepted,
+        "center_distance": center_dist,
+        "final_icp_fitness": final_fitness,
+        "registration_reliable": final_fitness >= MIN_ICP_FITNESS,
         "transform": T_final.tolist(),
         "displacement_stats": {
             "signed_normal": _stats(disp[:, 0]),

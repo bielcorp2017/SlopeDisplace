@@ -12,7 +12,7 @@ struct Config {
     std::string dataset;
     std::string target_file;
     int target_points = 500000;
-    std::vector<double> icp_voxels = {1.0, 0.4, 0.1, 0.05, 0.01};
+    std::vector<double> icp_voxels = {1.0, 0.4, 0.1, 0.05, 0.01, 0.005, 0.002};
     double fgr_voxel = 0.2;
 };
 
