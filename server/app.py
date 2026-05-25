@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import pipeline
+from . import wall_tilt as wt
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_ROOT / "web"
@@ -136,8 +137,50 @@ def start_preprocess(dataset: str, filename: str):
     def progress(stage: str, detail: str = ""):
         _update_job(jid, stage=stage, detail=detail)
 
+    MIN_FITNESS = 0.30  # 같은 임계값을 pipeline 들과 공유
+
+    def _check_meta_quality() -> tuple[bool, dict | None]:
+        """전처리 결과 meta.json 을 읽어 정합 품질을 평가.
+        반환 (reliable, meta_dict_or_None)."""
+        stem = Path(filename).stem
+        meta_path = folder / f"{stem}_meta.json"
+        if not meta_path.is_file():
+            return (False, None)
+        try:
+            m = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return (False, None)
+        if m.get("is_reference"):
+            return (True, m)
+        # registration_reliable 필드 우선
+        if m.get("registration_reliable") is True:
+            return (True, m)
+        if m.get("registration_reliable") is False:
+            return (False, m)
+        # 둘다 없으면 fitness 로 추론
+        fit = m.get("final_icp_fitness")
+        if fit is None and m.get("icp_history"):
+            fit = m["icp_history"][-1].get("fitness")
+        if fit is None:
+            return (False, m)
+        return (fit >= MIN_FITNESS, m)
+
+    def worker_python(use_existing_jid: bool = True):
+        """Python pipeline 으로 전처리 (fallback 으로도 호출됨)."""
+        try:
+            result = pipeline.preprocess(dataset, filename, progress=progress)
+            _update_job(
+                jid, status="done", stage="done", detail="",
+                finished=time.time(), result=result,
+            )
+        except Exception as e:  # noqa: BLE001
+            _update_job(
+                jid, status="error", stage="error",
+                detail=str(e), finished=time.time(), error=str(e),
+            )
+
     def worker_cpp():
-        """Run C++ preprocessor as subprocess, parse JSON-line progress."""
+        """Run C++ preprocessor. 끝나면 정합 품질 체크 → fitness 낮으면 Python 으로 재시도."""
         try:
             proc = subprocess.Popen(
                 [_CPP_EXE, "--dataset", dataset, "--target", filename,
@@ -159,38 +202,54 @@ def start_preprocess(dataset: str, filename: str):
                 _update_job(jid, status="error", stage="error",
                             detail=f"exit code {rc}", finished=time.time(),
                             error=f"C++ preprocessor exited with code {rc}")
-            else:
+                return
+
+            # C++ 성공 → 품질 체크
+            reliable, m = _check_meta_quality()
+            if reliable:
                 _update_job(jid, status="done", stage="done", detail="",
-                            finished=time.time())
+                            finished=time.time(), result=m)
+                return
+
+            # 불량 → Python fallback
+            fit = (m or {}).get("final_icp_fitness")
+            fit_pct = f"{fit*100:.1f}%" if fit is not None else "?"
+            _update_job(jid, stage="cpp_unreliable",
+                        detail=f"C++ ICP fitness {fit_pct} < {MIN_FITNESS*100:.0f}% — Python pipeline 으로 재시도")
+            worker_python(use_existing_jid=True)
         except Exception as e:
             _update_job(jid, status="error", stage="error",
                         detail=str(e), finished=time.time(), error=str(e))
 
-    def worker_python():
-        """Fallback: run Python pipeline."""
-        try:
-            result = pipeline.preprocess(dataset, filename, progress=progress)
-            _update_job(
-                jid,
-                status="done",
-                stage="done",
-                detail="",
-                finished=time.time(),
-                result=result,
-            )
-        except Exception as e:  # noqa: BLE001
-            _update_job(
-                jid,
-                status="error",
-                stage="error",
-                detail=str(e),
-                finished=time.time(),
-                error=str(e),
-            )
-
     worker = worker_cpp if _CPP_EXE else worker_python
     threading.Thread(target=worker, daemon=True).start()
     return {"job_id": jid}
+
+
+@app.get("/api/plumb/{dataset}")
+def get_plumb(dataset: str):
+    p = DATA_ROOT / dataset / "plumb.json"
+    if not p.is_file():
+        raise HTTPException(404, f"plumb.json not found for dataset: {dataset}")
+    return JSONResponse(json.loads(p.read_text(encoding="utf-8")))
+
+
+@app.get("/api/wall-tilt/{dataset}/{stem}")
+def get_wall_tilt(dataset: str, stem: str, recompute: bool = False):
+    """Return wall_tilt_<stem>.json — computes on demand if missing or recompute=true."""
+    folder = DATA_ROOT / dataset
+    cache = folder / f"wall_tilt_{stem}.json"
+    if cache.is_file() and not recompute:
+        return JSONResponse(json.loads(cache.read_text(encoding="utf-8")))
+    # compute now
+    try:
+        result = wt.compute_wall_tilt(dataset, stem, data_root=DATA_ROOT)
+    except FileNotFoundError as e:
+        raise HTTPException(404, f"prerequisite missing: {e}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    wt.save_result(result, cache)
+    return JSONResponse(result)
 
 
 @app.get("/api/job/{jid}")

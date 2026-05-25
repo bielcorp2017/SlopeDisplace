@@ -12,7 +12,9 @@ struct Config {
     std::string dataset;
     std::string target_file;
     int target_points = 500000;
-    std::vector<double> icp_voxels = {1.0, 0.4, 0.1, 0.05, 0.01, 0.005, 0.002};
+    // 1cm 이하 스케일은 스캐너 잡음(~3-5mm) 수준이라 fitness 가 폭락한다.
+    // Python pipeline 과 동일하게 1cm 에서 종료한다.
+    std::vector<double> icp_voxels = {1.0, 0.4, 0.1, 0.05, 0.01};
     double fgr_voxel = 0.2;
 };
 

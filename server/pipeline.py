@@ -39,6 +39,10 @@ def list_scan_files(dataset: str) -> list[dict]:
     for p in sorted(folder.glob("*.ply")):
         if p.stem.endswith("_simple"):
             continue  # skip downsampled files
+        # 파일명에 '_' 가 있는 변형(예: 20260522_tripod.ply, 20260522_rod_inliers.ply) 은
+        # 옹벽 모니터링 대상이 아니므로 목록에서 제외 — 날짜만으로 된 stem 만 표시
+        if "_" in p.stem:
+            continue
         stem = p.stem
         simple = folder / f"{stem}_simple.ply"
         meta = folder / f"{stem}_meta.json"

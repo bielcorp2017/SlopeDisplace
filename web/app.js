@@ -10,8 +10,8 @@ const state = {
   files: [],
   referenceName: null,
   selectedStem: null,
-  mode: "rgb",  // signed_normal | magnitude | horizontal | vertical | rgb
-  clamp: 0.05,            // half-range (e.g. ±0.05 m for signed; 0..0.05 for magnitude)
+  mode: "horizontal",  // signed_normal | magnitude | horizontal | vertical | rgb
+  clamp: 0.005,           // half-range (e.g. ±0.005 m for signed; 0..0.005 for magnitude)
   pointSize: 3.2,
   // Loaded cloud:
   geometry: null,
@@ -37,8 +37,24 @@ camera.position.set(2, 2, 2);
 camera.up.set(0, 0, 1);  // Z-up; common for scan data
 
 const controls = new OrbitControls(camera, canvas);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
+controls.enableDamping = false;
+controls.zoomSpeed = 1.0;       // OrbitControls 의 기본 zoom 은 사용 안 함 (아래에서 직접 처리)
+controls.rotateSpeed = 0.3;
+controls.enableZoom = false;    // 휠 줌은 직접 처리 (디바이스별 deltaY 변동 무시)
+
+// 휠 이벤트마다 고정 배수로 줌 — 트랙패드/마우스 무관하게 일정한 한 번당 줌량
+const ZOOM_FACTOR = 1.10;       // 한 번당 10%
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const sign = e.deltaY > 0 ? 1 : -1; // wheel down(deltaY>0) = zoom out
+  const factor = (sign > 0) ? ZOOM_FACTOR : (1 / ZOOM_FACTOR);
+  const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+  let dist = dir.length() * factor;
+  dist = Math.max(controls.minDistance, Math.min(controls.maxDistance, dist));
+  dir.setLength(dist);
+  camera.position.copy(controls.target).add(dir);
+  controls.update();
+}, { passive: false });
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 
@@ -387,7 +403,14 @@ async function loadFiles() {
   }
 
   // Auto-select reference (original) file first, then fall back to others.
-  const auto = r.files.find(f => f.name === r.reference && f.has_simple) || r.files.find(f => f.has_disp) || r.files.find(f => f.has_simple) || r.files[0];
+  // 가장 최근 (파일명 정렬 최후) 의 변위 데이터 보유 스캔을 우선 선택,
+  // 없으면 최근의 simple 보유 스캔, 없으면 reference, 그래도 없으면 첫 파일
+  const reversed = r.files.slice().reverse();
+  const auto =
+    reversed.find(f => f.name !== r.reference && f.has_disp) ||
+    reversed.find(f => f.name !== r.reference && f.has_simple) ||
+    r.files.find(f => f.name === r.reference && f.has_simple) ||
+    r.files[0];
   if (auto && (auto.has_disp || auto.has_simple)) selectFile(auto);
 }
 
@@ -402,6 +425,14 @@ function selectFile(f) {
     loadCloud(f.stem, false);
   } else {
     logJob(`'${f.name}'은 전처리가 필요합니다 — 옆 "전처리" 버튼을 누르세요.`, "warn");
+  }
+  // tilt 패널은 항상 최신 스캔 기반으로 유지 — 파일 선택과 무관하게 갱신만 (또는 그대로)
+  const tiltPanel = document.getElementById("tilt-panel");
+  if (tiltPanel && tiltPanel.classList.contains("open")) {
+    const latest = getLatestStemWithDisp();
+    if (latest && (!tiltLastData || tiltLastData.target !== latest)) {
+      loadTilt(latest);
+    }
   }
 }
 
@@ -476,12 +507,26 @@ async function loadCloud(stem, hasDisp) {
 
 function fitCameraTo(sphere) {
   if (!sphere) return;
-  const c = sphere.center, r = Math.max(sphere.radius, 0.5);
-  camera.position.set(-50, c.y, c.z);
+  const c = sphere.center.clone();
+  const r = Math.max(sphere.radius, 0.5);
+
+  // fov 에 맞춰 점군 전체가 화면에 들어가는 거리 계산 (+20% 여유)
+  const fov = camera.fov * Math.PI / 180;
+  const d = (r / Math.tan(fov / 2)) * 1.2;
+
+  // 카메라를 -X 방향 d 만큼 떨어뜨려 점군 중심 바라보기
+  camera.position.set(c.x - d, c.y, c.z);
   controls.target.copy(c);
-  camera.near = Math.max(r / 1000, 0.001);
-  camera.far  = r * 100;
+
+  // near 는 작게(점 안까지 가도 안 잘리게), far 는 충분히 크게
+  camera.near = Math.max(d * 0.001, 0.01);
+  camera.far  = d * 200;
   camera.updateProjectionMatrix();
+
+  // 줌 범위 제한 — 너무 가까이 들어가거나 너무 멀어지지 않게
+  // 이전 r×0.05 / r×30 은 너무 넓어 limit 에 닿으면 점군이 사라지는 듯 보였음
+  controls.minDistance = r * 0.2;   // 옹벽 표면 가까이까지만
+  controls.maxDistance = r * 6;     // 점군이 항상 화면에 의미있게 보이는 거리
   controls.update();
 }
 
@@ -540,6 +585,307 @@ function logJob(msg, kind="") {
   while (div.children.length > 200) div.removeChild(div.firstChild);
 }
 
+// ---- Tilt analysis panel ----
+let tiltChart = null;
+let tiltLinesGroup = null;
+let tiltLastData = null;
+let tiltExagg = 1000;
+let tiltLinesVisible = true;
+
+// 가장 최근 스캔(파일명 정렬 최후) 중 변위 데이터가 있는 것을 선택.
+// reference 스캔은 자기 자신과 비교가 없으므로 제외.
+function getLatestStemWithDisp() {
+  if (!state.files || state.files.length === 0) return null;
+  for (let i = state.files.length - 1; i >= 0; i--) {
+    const f = state.files[i];
+    if (f.name === state.referenceName) continue;
+    if (f.has_disp) return f.stem;
+  }
+  return null;
+}
+
+function clearTiltLines() {
+  if (tiltLinesGroup) {
+    scene.remove(tiltLinesGroup);
+    tiltLinesGroup.traverse(o => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) o.material.dispose();
+    });
+    tiltLinesGroup = null;
+  }
+}
+
+function buildTiltLines(t, exagg) {
+  clearTiltLines();
+  if (!t || !t.wall_centroid_xyz || !t.wall_facing_xy) return;
+  if (!tiltLinesVisible) return;
+
+  const c = new THREE.Vector3(...t.wall_centroid_xyz);
+  const plumb = new THREE.Vector3(...t.plumb_axis).normalize();
+  const facing = new THREE.Vector3(...t.wall_facing_xy);
+  facing.z = 0;
+  if (facing.lengthSq() < 1e-6) facing.set(1, 0, 0); else facing.normalize();
+  const alpha = t.alpha_mm_per_m;
+
+  // rotation axis (perpendicular to plumb and facing) - around which we tilt
+  const rotAxis = new THREE.Vector3().crossVectors(plumb, facing).normalize();
+  const effTilt = (alpha / 1000) * exagg;        // radians, exaggerated
+  const lean = plumb.clone().applyAxisAngle(rotAxis, effTilt).normalize();
+
+  const hRange = t.height_range_m;
+  const wallH = (hRange ? (hRange[1] - hRange[0]) : 10);
+  const L = Math.max(20, wallH * 1.4);
+
+  const group = new THREE.Group();
+
+  // 1) Plumb reference line (yellow)
+  {
+    const p0 = c.clone().addScaledVector(plumb, -L * 0.5);
+    const p1 = c.clone().addScaledVector(plumb, L * 0.6);
+    const g = new THREE.BufferGeometry().setFromPoints([p0, p1]);
+    const m = new THREE.LineBasicMaterial({ color: 0xffd54a, depthTest: true });
+    group.add(new THREE.Line(g, m));
+  }
+  // 2) Wall lean line (red) — exaggerated
+  {
+    const p0 = c.clone().addScaledVector(lean, -L * 0.5);
+    const p1 = c.clone().addScaledVector(lean, L * 0.6);
+    const g = new THREE.BufferGeometry().setFromPoints([p0, p1]);
+    const m = new THREE.LineBasicMaterial({ color: 0xff5050, depthTest: true });
+    group.add(new THREE.Line(g, m));
+  }
+  // 3) Centroid marker (small yellow sphere)
+  {
+    const r = Math.max(L * 0.012, 0.05);
+    const sg = new THREE.SphereGeometry(r, 20, 14);
+    const sm = new THREE.MeshBasicMaterial({ color: 0xffd54a });
+    const sph = new THREE.Mesh(sg, sm);
+    sph.position.copy(c);
+    group.add(sph);
+  }
+  // 4) Top markers — endpoints near top so user sees divergence
+  {
+    const r = Math.max(L * 0.008, 0.03);
+    const plumbTop = c.clone().addScaledVector(plumb, L * 0.6);
+    const leanTop = c.clone().addScaledVector(lean, L * 0.6);
+    const sg = new THREE.SphereGeometry(r, 16, 10);
+    const m1 = new THREE.MeshBasicMaterial({ color: 0xffd54a });
+    const m2 = new THREE.MeshBasicMaterial({ color: 0xff5050 });
+    const a = new THREE.Mesh(sg, m1); a.position.copy(plumbTop); group.add(a);
+    const b = new THREE.Mesh(sg.clone(), m2); b.position.copy(leanTop); group.add(b);
+  }
+
+  scene.add(group);
+  tiltLinesGroup = group;
+}
+
+function fmt(n, d = 4, sign = false) {
+  if (n === null || n === undefined || !isFinite(n)) return "—";
+  const s = n.toFixed(d);
+  return (sign && n >= 0 ? "+" : "") + s;
+}
+
+function renderTilt(t) {
+  const body = $("tilt-body");
+  tiltLastData = t;
+  if (!t) {
+    body.innerHTML = '<div class="empty-msg">변위 데이터가 있는 스캔을 선택하세요.</div>';
+    if (tiltChart) { tiltChart.destroy(); tiltChart = null; }
+    clearTiltLines();
+    return;
+  }
+  const isNoChange = !t.significant;
+  const dirClass = isNoChange ? "nochange" : (t.tilt_direction === "OUTWARD" ? "outward" : "inward");
+  const arrow = isNoChange ? "≈" : (t.tilt_direction === "OUTWARD" ? "→ OUT" : "← IN");
+
+  // registration 품질 경고
+  let warnHtml = "";
+  const fit = t.icp_fitness;
+  const reliable = t.registration_reliable;
+  const sigma = t.residual_robust_sigma_mm;
+  if (fit !== null && fit !== undefined && fit < 0.30) {
+    warnHtml += `<div class="tilt-warn">⚠ <b>정합 품질 낮음</b><br>
+      ICP fitness ${(fit*100).toFixed(1)}% (권장 ≥30%) — 두 점군이 미세하게 안 맞춰져
+      회귀 결과가 옹벽 변화가 아닌 정합 오차일 수 있음. 재전처리 권장.</div>`;
+  } else if (reliable === false) {
+    warnHtml += `<div class="tilt-warn">⚠ 정합 메타가 'unreliable' 로 마킹됨.</div>`;
+  }
+  if (sigma > 30) {
+    warnHtml += `<div class="tilt-warn">⚠ <b>잔차 σ=${sigma.toFixed(0)} mm</b> 가 큼.
+      스캐너 잡음(2-5mm) 대비 과도 — 옹벽 외 큰 장면 변화 가능성.</div>`;
+  }
+
+  body.innerHTML = warnHtml + `
+    <div class="tilt-card">
+      <div class="pair" style="display:flex;align-items:center;gap:6px">
+        <span style="background:rgba(78,161,255,.2);color:var(--accent);padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">최신</span>
+        <b>${t.reference}</b> → <b>${t.target}</b>
+      </div>
+      <div class="tilt-headline ${dirClass}">${fmt(t.tilt_change_deg, 4, true)}°  ${arrow}</div>
+      <div class="tilt-ci">95% CI [${fmt(t.tilt_change_ci95_deg[0], 4, true)}, ${fmt(t.tilt_change_ci95_deg[1], 4, true)}]°</div>
+      <div class="tilt-verdict ${isNoChange ? "nosig" : "sig"}">${t.verdict}</div>
+      <div class="tilt-metrics">
+        <span class="k">α</span><span>${fmt(t.alpha_mm_per_m, 3, true)} mm/m</span>
+        <span class="k">α 95% CI</span><span>[${fmt(t.alpha_ci95_mm_per_m[0], 3, true)}, ${fmt(t.alpha_ci95_mm_per_m[1], 3, true)}]</span>
+        <span class="k">β (h_ref)</span><span>${fmt(t.beta_mm, 2, true)} mm</span>
+        <span class="k">잔차 σ</span><span>${fmt(t.residual_robust_sigma_mm, 2)} mm</span>
+        <span class="k">옹벽 점수</span><span>${t.wall_face_point_count.toLocaleString()} / ${t.total_point_count.toLocaleString()}</span>
+        <span class="k">높이 범위</span><span>${fmt(t.height_range_m[0], 2)} ~ ${fmt(t.height_range_m[1], 2)} m</span>
+        <span class="k">R²</span><span>${fmt(t.r_squared, 4)}</span>
+        <span class="k">ICP fitness</span><span>${fit !== null && fit !== undefined ? (fit*100).toFixed(1)+"%" : "—"}</span>
+      </div>
+    </div>
+    <div class="tilt-chart-wrap"><canvas id="tilt-chart"></canvas></div>
+    <div class="tilt-3d">
+      <div class="tilt-3d-row">
+        <label>3D 라인</label>
+        <input type="checkbox" id="tilt-lines-vis" ${tiltLinesVisible ? "checked" : ""} />
+        <span style="flex:1"></span>
+        <span class="swatch" style="background:#ffd54a"></span><span style="font-size:10px;color:#98a0ad">plumb</span>
+        <span class="swatch" style="background:#ff5050;margin-left:6px"></span><span style="font-size:10px;color:#98a0ad">lean</span>
+      </div>
+      <div class="tilt-3d-row">
+        <label>과장</label>
+        <input type="range" id="tilt-exagg" min="0" max="5000" step="50" value="${tiltExagg}" />
+        <span class="val" id="tilt-exagg-val">×${tiltExagg}</span>
+      </div>
+      <div class="tilt-3d-legend">실제 ${fmt(t.tilt_change_deg, 4, true)}° → 화면 ${fmt(t.tilt_change_deg * tiltExagg, 2, true)}°</div>
+    </div>
+    <div class="tilt-actions">
+      <button id="tilt-recompute">재계산</button>
+    </div>
+  `;
+
+  // chart
+  const ctx = $("tilt-chart").getContext("2d");
+  if (tiltChart) tiltChart.destroy();
+  const h = t.scatter_h_m, d = t.scatter_d_mm;
+  const scatterData = h.map((hi, i) => ({ x: hi, y: d[i] }));
+  // regression line endpoints
+  const h_ref = t.h_ref_m, alpha = t.alpha_mm_per_m, beta = t.beta_mm;
+  const h0 = t.height_range_m[0], h1 = t.height_range_m[1];
+  const lineData = [
+    { x: h0, y: alpha * (h0 - h_ref) + beta },
+    { x: h1, y: alpha * (h1 - h_ref) + beta },
+  ];
+  tiltChart = new Chart(ctx, {
+    type: "scatter",
+    data: {
+      datasets: [
+        {
+          label: "wall point",
+          data: scatterData,
+          backgroundColor: "rgba(78,161,255,0.35)",
+          pointRadius: 1.2,
+          pointHoverRadius: 3,
+        },
+        {
+          label: `α=${fmt(alpha, 3, true)} mm/m`,
+          data: lineData,
+          type: "line",
+          borderColor: "rgba(248,113,113,0.9)",
+          borderWidth: 2,
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      parsing: false,
+      plugins: {
+        legend: { display: true, position: "top",
+                  labels: { color: "#98a0ad", font: { size: 10 }, boxWidth: 14 } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `h=${ctx.parsed.x.toFixed(2)}m, d=${ctx.parsed.y.toFixed(2)}mm`,
+          },
+        },
+      },
+      scales: {
+        x: { type: "linear",
+             title: { display: true, text: "h along plumb (m)", color: "#98a0ad", font: { size: 10 } },
+             ticks: { color: "#98a0ad", font: { size: 10 } },
+             grid: { color: "rgba(255,255,255,0.06)" } },
+        y: { type: "linear",
+             title: { display: true, text: "signed disp (mm) — out +", color: "#98a0ad", font: { size: 10 } },
+             ticks: { color: "#98a0ad", font: { size: 10 } },
+             grid: { color: "rgba(255,255,255,0.06)" } },
+      },
+    },
+  });
+
+  $("tilt-recompute").addEventListener("click", async () => {
+    if (!state.dataset) return;
+    const latest = getLatestStemWithDisp();
+    if (!latest) return;
+    await loadTilt(latest, /*recompute=*/true);
+  });
+
+  // 3D lines controls
+  $("tilt-lines-vis").addEventListener("change", (e) => {
+    tiltLinesVisible = e.target.checked;
+    if (tiltLinesVisible) buildTiltLines(tiltLastData, tiltExagg);
+    else clearTiltLines();
+  });
+  $("tilt-exagg").addEventListener("input", (e) => {
+    tiltExagg = parseInt(e.target.value, 10);
+    $("tilt-exagg-val").textContent = "×" + tiltExagg;
+    const legend = document.querySelector(".tilt-3d-legend");
+    if (legend && tiltLastData) {
+      legend.textContent = `실제 ${fmt(tiltLastData.tilt_change_deg, 4, true)}° → 화면 ${fmt(tiltLastData.tilt_change_deg * tiltExagg, 2, true)}°`;
+    }
+    buildTiltLines(tiltLastData, tiltExagg);
+  });
+
+  // 3D 라인 즉시 그리기
+  buildTiltLines(t, tiltExagg);
+}
+
+async function loadTilt(stem, recompute = false) {
+  if (!stem) { renderTilt(null); return; }
+  const url = `/api/wall-tilt/${encodeURIComponent(state.dataset)}/${encodeURIComponent(stem)}` +
+              (recompute ? "?recompute=true" : "");
+  try {
+    renderTilt(null);
+    const body = $("tilt-body");
+    body.innerHTML = '<div class="empty-msg"><span class="spinner"></span> 계산 중...</div>';
+    const r = await fetch(url);
+    if (r.status === 404) {
+      body.innerHTML = '<div class="empty-msg">plumb.json 또는 변위 데이터가 없습니다.</div>';
+      return;
+    }
+    if (!r.ok) {
+      const msg = await r.text();
+      body.innerHTML = `<div class="empty-msg" style="color:var(--err)">에러: ${msg}</div>`;
+      return;
+    }
+    const t = await r.json();
+    renderTilt(t);
+  } catch (e) {
+    $("tilt-body").innerHTML = `<div class="empty-msg" style="color:var(--err)">실패: ${e.message}</div>`;
+  }
+}
+
+$("tilt-toggle").addEventListener("click", () => {
+  const panel = $("tilt-panel");
+  const btn = $("tilt-toggle");
+  const opened = panel.classList.toggle("open");
+  btn.classList.toggle("active", opened);
+  if (opened) {
+    // 패널은 항상 "최신 스캔" 의 기울기를 보여준다 (3D 뷰의 선택 파일과 무관)
+    const latest = getLatestStemWithDisp();
+    if (latest) loadTilt(latest);
+    else renderTilt(null);
+  } else {
+    // 패널이 닫히면 3D 라인도 제거
+    clearTiltLines();
+  }
+});
+
 // ---- UI events ----
 $("dataset").addEventListener("change", (e) => {
   state.dataset = e.target.value;
@@ -567,6 +913,11 @@ $("clamp").addEventListener("input", (e) => {
 $("psize").addEventListener("input", (e) => {
   state.pointSize = parseFloat(e.target.value);
   if (pointsMaterial) pointsMaterial.size = state.pointSize;
+});
+$("cam-reset").addEventListener("click", () => {
+  if (state.geometry && state.geometry.boundingSphere) {
+    fitCameraTo(state.geometry.boundingSphere);
+  }
 });
 
 // ---- Boot ----

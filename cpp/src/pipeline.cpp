@@ -133,11 +133,11 @@ multiscale_icp(const PointCloudF& src_full, const PointCloudF& tgt_full,
                ProgressCallback progress) {
     Eigen::Matrix4d T = init_T;
     std::vector<ICPScaleResult> history;
+    const size_t n_scales = voxels.size();
 
-    for (size_t si = 0; si < voxels.size(); ++si) {
+    for (size_t si = 0; si < n_scales; ++si) {
         double v = voxels[si];
 
-        // Build O3D clouds from full float32 via voxel downsampling
         auto s_o3d = to_o3d(src_full.xyz.data(), src_full.size());
         auto t_o3d = to_o3d(tgt_full.xyz.data(), tgt_full.size());
         auto s = s_o3d.VoxelDownSample(v);
@@ -146,16 +146,24 @@ multiscale_icp(const PointCloudF& src_full, const PointCloudF& tgt_full,
         s->EstimateNormals(geometry::KDTreeSearchParamHybrid(v * 2.0, 30));
         t->EstimateNormals(geometry::KDTreeSearchParamHybrid(v * 2.0, 30));
 
+        // Match Python pipeline:
+        //   coarse scales (first half): cd = v*4, max_iter=200
+        //   fine   scales (last half) : cd = v*2, max_iter=100
+        bool coarse = (si < n_scales / 2);
+        double cd = v * (coarse ? 4.0 : 2.0);
+        int max_iter = coarse ? 200 : 100;
+
         if (progress) {
-            progress("icp",
-                "scale " + std::to_string(si+1) + "/" + std::to_string(voxels.size()) +
-                ", voxel=" + std::to_string(v) + "m, pts=" + fmt_count(s->points_.size()),
-                static_cast<float>(si) / voxels.size());
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "scale %zu/%zu, voxel=%.3fm, cd=%.2fm, pts=%zu",
+                     si+1, n_scales, v, cd, s->points_.size());
+            progress("icp", buf, static_cast<float>(si) / n_scales);
         }
 
-        auto criteria = pipelines::registration::ICPConvergenceCriteria(50, 1e-7, 1e-7);
+        auto criteria = pipelines::registration::ICPConvergenceCriteria(max_iter, 1e-7, 1e-7);
         auto result = pipelines::registration::RegistrationICP(
-            *s, *t, v * 2.0, T,
+            *s, *t, cd, T,
             pipelines::registration::TransformationEstimationPointToPlane(),
             criteria);
 
@@ -172,11 +180,20 @@ multiscale_icp(const PointCloudF& src_full, const PointCloudF& tgt_full,
         if (progress) {
             char buf[128];
             snprintf(buf, sizeof(buf), "scale %zu/%zu: fitness=%.4f, RMSE=%.6fm",
-                     si+1, voxels.size(), sr.fitness, sr.inlier_rmse);
-            progress("icp_result", buf, static_cast<float>(si+1) / voxels.size());
+                     si+1, n_scales, sr.fitness, sr.inlier_rmse);
+            progress("icp_result", buf, static_cast<float>(si+1) / n_scales);
         }
     }
     return {T, history};
+}
+
+// FGR 결과의 회전 각도(deg)
+static double rotation_angle_deg(const Eigen::Matrix4d& T) {
+    Eigen::Matrix3d R = T.block<3,3>(0,0);
+    double trace = std::clamp(R.trace(), -1.0, 3.0);
+    double angle = std::acos(std::clamp((trace - 1.0) / 2.0, -1.0, 1.0));
+    constexpr double PI = 3.14159265358979323846;
+    return angle * 180.0 / PI;
 }
 
 // Apply 4x4 transform to float32 XYZ array in-place (OpenMP)
@@ -355,11 +372,83 @@ int run(const Config& cfg, ProgressCallback progress) {
     Eigen::Matrix4d T0 = fgr_global(src_o3d, tgt_o3d, cfg.fgr_voxel);
     timing["fgr"] = elapsed() - t0;
 
+    // --- FGR sanity check (Python pipeline 과 동일) ---
+    constexpr double COLOCATED_THRESHOLD = 5.0;     // m
+    constexpr double MAX_FGR_ROTATION_DEG = 30.0;
+    constexpr double MIN_ICP_FITNESS = 0.30;
+
+    double fgr_angle = rotation_angle_deg(T0);
+    Eigen::Vector3d ref_center{0,0,0}, tgt_center{0,0,0};
+    for (auto& p : src_o3d.points_) tgt_center += p;
+    for (auto& p : tgt_o3d.points_) ref_center += p;
+    if (!src_o3d.points_.empty()) tgt_center /= (double)src_o3d.points_.size();
+    if (!tgt_o3d.points_.empty()) ref_center /= (double)tgt_o3d.points_.size();
+    double center_dist = (tgt_center - ref_center).norm();
+    bool colocated = center_dist < COLOCATED_THRESHOLD;
+
+    Eigen::Matrix4d T0_used = T0;
+    bool fgr_accepted = true;
+    if (colocated && fgr_angle > MAX_FGR_ROTATION_DEG) {
+        fgr_accepted = false;
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "Co-located (center dist %.1fm) but FGR rotation %.1f° > %.0f°"
+                 " -- falling back to identity init",
+                 center_dist, fgr_angle, MAX_FGR_ROTATION_DEG);
+        P("fgr_rejected", buf);
+        T0_used = Eigen::Matrix4d::Identity();
+    } else {
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "FGR rotation %.1f°, center dist %.1fm", fgr_angle, center_dist);
+        P("fgr_ok", buf);
+    }
+
     // --- Multi-scale ICP on full clouds ---
     P("icp", "voxels=" + std::to_string(cfg.icp_voxels.size()) + " scales");
     t0 = elapsed();
-    auto [T_final, history] = multiscale_icp(tgt_full, ref_full, T0, cfg.icp_voxels, progress);
+    auto [T_final, history] = multiscale_icp(tgt_full, ref_full, T0_used,
+                                              cfg.icp_voxels, progress);
     timing["icp"] = elapsed() - t0;
+
+    // --- If ICP fitness is poor and FGR init was used, retry with identity ---
+    double final_fitness = history.empty() ? 0.0 : history.back().fitness;
+    if (final_fitness < MIN_ICP_FITNESS && fgr_accepted) {
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "ICP fitness %.4f < %.2f, retrying with identity init",
+                 final_fitness, MIN_ICP_FITNESS);
+        P("icp_retry", buf);
+        t0 = elapsed();
+        auto [T_retry, history_retry] = multiscale_icp(
+            tgt_full, ref_full, Eigen::Matrix4d::Identity(),
+            cfg.icp_voxels, progress);
+        timing["icp_retry"] = elapsed() - t0;
+        double retry_fitness = history_retry.empty() ? 0.0 : history_retry.back().fitness;
+        if (retry_fitness > final_fitness) {
+            snprintf(buf, sizeof(buf),
+                     "Identity-init fitness %.4f > FGR-init %.4f, using retry",
+                     retry_fitness, final_fitness);
+            P("icp_retry_accepted", buf);
+            T_final = T_retry;
+            history = history_retry;
+            T0_used = Eigen::Matrix4d::Identity();
+            final_fitness = retry_fitness;
+        } else {
+            snprintf(buf, sizeof(buf),
+                     "Identity-init fitness %.4f <= FGR-init %.4f, keeping original",
+                     retry_fitness, final_fitness);
+            P("icp_retry_rejected", buf);
+        }
+    }
+    if (final_fitness < MIN_ICP_FITNESS) {
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "Final ICP fitness %.4f below %.2f -- displacement may be unreliable",
+                 final_fitness, MIN_ICP_FITNESS);
+        P("warning", buf);
+    }
+    bool registration_reliable = final_fitness >= MIN_ICP_FITNESS;
 
     // --- Apply transform to simple cloud and save ---
     apply_transform(tgt_ds.xyz.data(), tgt_ds.xyz.size() / 3, T_final);
@@ -457,6 +546,12 @@ int run(const Config& cfg, ProgressCallback progress) {
         {"icp_voxels", cfg.icp_voxels},
         {"icp_history", icp_hist},
         {"transform_global", to_list(T0)},
+        {"transform_global_used", to_list(T0_used)},
+        {"fgr_rotation_deg", fgr_angle},
+        {"fgr_accepted", fgr_accepted},
+        {"center_distance", center_dist},
+        {"final_icp_fitness", final_fitness},
+        {"registration_reliable", registration_reliable},
         {"transform", to_list(T_final)},
         {"displacement_stats", {
             {"signed_normal", stats(disp_simple.data(), n_simple, 4, 0)},

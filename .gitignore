@@ -9,3 +9,4 @@ claude.exe
 cpp/build/
 cpp/open3d/
 cpp/*.zip
+.idea/
