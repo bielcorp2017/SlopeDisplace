@@ -153,6 +153,20 @@ def compute_wall_tilt(
     facing_mean = n_xy_unit.mean(axis=0)
     fn = float(np.linalg.norm(facing_mean))
     facing_dir = facing_mean / fn if fn > 1e-6 else np.array([1.0, 0.0, 0.0])
+
+    # 절대 기울기 (수직 대비) — reference scan 의 벽면 노멀 기준.
+    # 노멀이 outward 와 같은 반구를 보도록 부호 정렬 후, plumb 축 성분으로 기울기 계산.
+    # 부호: 양수 = OUTWARD lean (상부가 base 보다 바깥으로 기울어짐).
+    sign_outward = np.sign(n_wall @ facing_dir)
+    sign_outward[sign_outward == 0] = 1.0
+    n_oriented = n_wall * sign_outward[:, None]
+    vert_comp = np.clip(n_oriented @ axis, -1.0, 1.0)
+    tilt_per_point_deg = np.degrees(np.arcsin(vert_comp))
+    ref_abs_tilt_deg = float(np.median(tilt_per_point_deg))
+    ref_abs_tilt_iqr_deg = float(
+        np.percentile(tilt_per_point_deg, 75) - np.percentile(tilt_per_point_deg, 25)
+    )
+
     h_ref = float(np.median(h_w))
     x = h_w - h_ref
     y = d_w
@@ -204,6 +218,11 @@ def compute_wall_tilt(
         "tilt_direction": tilt_dir,
         "significant": bool(significant),
         "verdict": verdict,
+        # 절대 기울기 (수직 대비). reference = 기준 스캔, target = reference + 변화량.
+        # 양수 = OUTWARD lean (상부가 base 보다 바깥으로), 음수 = INWARD lean.
+        "reference_absolute_tilt_deg": ref_abs_tilt_deg,
+        "reference_absolute_tilt_iqr_deg": ref_abs_tilt_iqr_deg,
+        "target_absolute_tilt_deg": ref_abs_tilt_deg + alpha_deg,
         "params": {
             "mask_nz": mask_nz,
             "mag_min_m": mag_min_m,

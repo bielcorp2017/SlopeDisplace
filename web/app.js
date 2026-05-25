@@ -638,29 +638,34 @@ function buildTiltLines(t, exagg) {
 
   const group = new THREE.Group();
 
-  // 1) Plumb reference line (yellow)
+  // 1) Plumb reference line (yellow) — depthTest off 로 점군 위에 항상 보이게
   {
     const p0 = c.clone().addScaledVector(plumb, -L * 0.5);
     const p1 = c.clone().addScaledVector(plumb, L * 0.6);
     const g = new THREE.BufferGeometry().setFromPoints([p0, p1]);
-    const m = new THREE.LineBasicMaterial({ color: 0xffd54a, depthTest: true });
-    group.add(new THREE.Line(g, m));
+    const m = new THREE.LineBasicMaterial({ color: 0xffd54a, depthTest: false, transparent: true, opacity: 0.95 });
+    const ln = new THREE.Line(g, m);
+    ln.renderOrder = 999;
+    group.add(ln);
   }
   // 2) Wall lean line (red) — exaggerated
   {
     const p0 = c.clone().addScaledVector(lean, -L * 0.5);
     const p1 = c.clone().addScaledVector(lean, L * 0.6);
     const g = new THREE.BufferGeometry().setFromPoints([p0, p1]);
-    const m = new THREE.LineBasicMaterial({ color: 0xff5050, depthTest: true });
-    group.add(new THREE.Line(g, m));
+    const m = new THREE.LineBasicMaterial({ color: 0xff5050, depthTest: false, transparent: true, opacity: 0.95 });
+    const ln = new THREE.Line(g, m);
+    ln.renderOrder = 999;
+    group.add(ln);
   }
   // 3) Centroid marker (small yellow sphere)
   {
     const r = Math.max(L * 0.012, 0.05);
     const sg = new THREE.SphereGeometry(r, 20, 14);
-    const sm = new THREE.MeshBasicMaterial({ color: 0xffd54a });
+    const sm = new THREE.MeshBasicMaterial({ color: 0xffd54a, depthTest: false });
     const sph = new THREE.Mesh(sg, sm);
     sph.position.copy(c);
+    sph.renderOrder = 999;
     group.add(sph);
   }
   // 4) Top markers — endpoints near top so user sees divergence
@@ -669,10 +674,10 @@ function buildTiltLines(t, exagg) {
     const plumbTop = c.clone().addScaledVector(plumb, L * 0.6);
     const leanTop = c.clone().addScaledVector(lean, L * 0.6);
     const sg = new THREE.SphereGeometry(r, 16, 10);
-    const m1 = new THREE.MeshBasicMaterial({ color: 0xffd54a });
-    const m2 = new THREE.MeshBasicMaterial({ color: 0xff5050 });
-    const a = new THREE.Mesh(sg, m1); a.position.copy(plumbTop); group.add(a);
-    const b = new THREE.Mesh(sg.clone(), m2); b.position.copy(leanTop); group.add(b);
+    const m1 = new THREE.MeshBasicMaterial({ color: 0xffd54a, depthTest: false });
+    const m2 = new THREE.MeshBasicMaterial({ color: 0xff5050, depthTest: false });
+    const a = new THREE.Mesh(sg, m1); a.position.copy(plumbTop); a.renderOrder = 999; group.add(a);
+    const b = new THREE.Mesh(sg.clone(), m2); b.position.copy(leanTop); b.renderOrder = 999; group.add(b);
   }
 
   scene.add(group);
@@ -715,12 +720,36 @@ function renderTilt(t) {
       스캐너 잡음(2-5mm) 대비 과도 — 옹벽 외 큰 장면 변화 가능성.</div>`;
   }
 
+  // 절대 기울기 (수직 대비) — 구버전 캐시엔 필드 없을 수 있음
+  const refAbs = t.reference_absolute_tilt_deg;
+  const tgtAbs = t.target_absolute_tilt_deg;
+  const refAbsIqr = t.reference_absolute_tilt_iqr_deg;
+  const hasAbs = (typeof refAbs === "number") && (typeof tgtAbs === "number");
+  const absHtml = hasAbs ? `
+      <div class="tilt-abs">
+        <div class="tilt-abs-row">
+          <span class="tilt-abs-label">수직 대비 절대 기울기</span>
+        </div>
+        <div class="tilt-abs-row tilt-abs-main">
+          <span class="tilt-abs-num ${tgtAbs >= 0 ? 'out' : 'in'}">${fmt(Math.abs(tgtAbs), 3)}°</span>
+          <span class="tilt-abs-dir">${tgtAbs >= 0 ? "OUTWARD" : "INWARD"}</span>
+          <span class="tilt-abs-sub">(${t.target} 기준)</span>
+        </div>
+        <div class="tilt-abs-row tilt-abs-prev">
+          이전 ${t.reference}: ${fmt(Math.abs(refAbs), 3)}° ${refAbs >= 0 ? "OUTWARD" : "INWARD"}
+          ${typeof refAbsIqr === "number" ? `<span class="tilt-abs-iqr">(per-point IQR ${fmt(refAbsIqr, 2)}°)</span>` : ""}
+        </div>
+      </div>
+  ` : "";
+
   body.innerHTML = warnHtml + `
     <div class="tilt-card">
       <div class="pair" style="display:flex;align-items:center;gap:6px">
-        <span style="background:rgba(78,161,255,.2);color:var(--accent);padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">최신</span>
+        <span style="background:rgba(78,161,255,.2);color:var(--accent);padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600">최신</span>
         <b>${t.reference}</b> → <b>${t.target}</b>
       </div>
+      ${absHtml}
+      <div class="tilt-section-label">스캔 사이 기울기 <em>변화</em></div>
       <div class="tilt-headline ${dirClass}">${fmt(t.tilt_change_deg, 4, true)}°  ${arrow}</div>
       <div class="tilt-ci">95% CI [${fmt(t.tilt_change_ci95_deg[0], 4, true)}, ${fmt(t.tilt_change_ci95_deg[1], 4, true)}]°</div>
       <div class="tilt-verdict ${isNoChange ? "nosig" : "sig"}">${t.verdict}</div>
@@ -741,8 +770,8 @@ function renderTilt(t) {
         <label>3D 라인</label>
         <input type="checkbox" id="tilt-lines-vis" ${tiltLinesVisible ? "checked" : ""} />
         <span style="flex:1"></span>
-        <span class="swatch" style="background:#ffd54a"></span><span style="font-size:10px;color:#98a0ad">plumb</span>
-        <span class="swatch" style="background:#ff5050;margin-left:6px"></span><span style="font-size:10px;color:#98a0ad">lean</span>
+        <span class="swatch" style="background:#ffd54a"></span><span style="font-size:11px;color:#98a0ad">plumb</span>
+        <span class="swatch" style="background:#ff5050;margin-left:6px"></span><span style="font-size:11px;color:#98a0ad">lean</span>
       </div>
       <div class="tilt-3d-row">
         <label>과장</label>
@@ -798,7 +827,7 @@ function renderTilt(t) {
       parsing: false,
       plugins: {
         legend: { display: true, position: "top",
-                  labels: { color: "#98a0ad", font: { size: 10 }, boxWidth: 14 } },
+                  labels: { color: "#98a0ad", font: { size: 11 }, boxWidth: 14 } },
         tooltip: {
           callbacks: {
             label: (ctx) => `h=${ctx.parsed.x.toFixed(2)}m, d=${ctx.parsed.y.toFixed(2)}mm`,
@@ -807,12 +836,12 @@ function renderTilt(t) {
       },
       scales: {
         x: { type: "linear",
-             title: { display: true, text: "h along plumb (m)", color: "#98a0ad", font: { size: 10 } },
-             ticks: { color: "#98a0ad", font: { size: 10 } },
+             title: { display: true, text: "h along plumb (m)", color: "#98a0ad", font: { size: 11 } },
+             ticks: { color: "#98a0ad", font: { size: 11 } },
              grid: { color: "rgba(255,255,255,0.06)" } },
         y: { type: "linear",
-             title: { display: true, text: "signed disp (mm) — out +", color: "#98a0ad", font: { size: 10 } },
-             ticks: { color: "#98a0ad", font: { size: 10 } },
+             title: { display: true, text: "signed disp (mm) — out +", color: "#98a0ad", font: { size: 11 } },
+             ticks: { color: "#98a0ad", font: { size: 11 } },
              grid: { color: "rgba(255,255,255,0.06)" } },
       },
     },

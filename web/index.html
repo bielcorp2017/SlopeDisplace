@@ -20,7 +20,7 @@
   html, body { margin: 0; padding: 0; height: 100%; }
   body {
     background: var(--bg); color: var(--text);
-    font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     display: grid; grid-template-columns: 360px 1fr; grid-template-rows: 100vh;
     height: 100vh; width: 100vw; overflow: hidden;
   }
@@ -33,7 +33,7 @@
     display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
   }
   .left header h1 {
-    font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px;
+    font-size: 20px; margin: 0; font-weight: 700; letter-spacing: .2px;
     line-height: 1.30; flex: 1 1 100%; color: #f1f3f6;
   }
   .left header select {
@@ -44,7 +44,7 @@
   .filelist { overflow: auto; flex: 1; }
   table.files { width: 100%; border-collapse: collapse; table-layout: fixed; }
   table.files th, table.files td {
-    padding: 8px 10px; font-size: 12px; text-align: left;
+    padding: 8px 10px; font-size: 13px; text-align: left;
     border-bottom: 1px solid var(--border);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
@@ -60,18 +60,18 @@
   table.files tr.row.ref td:first-child::before {
     content: "★ "; color: var(--warn); margin-right: 2px;
   }
-  .status { font-size: 11px; color: var(--text-dim); }
+  .status { font-size: 12px; color: var(--text-dim); }
   .status.ok { color: var(--ok); }
   .status.warn { color: var(--warn); }
   button.pre {
-    font-size: 11px; padding: 3px 8px; border-radius: 4px;
+    font-size: 12px; padding: 3px 8px; border-radius: 4px;
     border: 1px solid var(--accent); color: var(--accent); background: transparent;
     cursor: pointer; white-space: nowrap;
   }
   button.pre:hover { background: rgba(78,161,255,.12); }
   button.pre:disabled { opacity: .5; cursor: default; }
   .joblog {
-    padding: 10px 14px; border-top: 1px solid var(--border); font-size: 11px;
+    padding: 10px 14px; border-top: 1px solid var(--border); font-size: 12px;
     color: var(--text-dim); max-height: 160px; overflow: auto; background: var(--panel2);
   }
   .joblog .line { font-family: ui-monospace, monospace; padding: 1px 0; }
@@ -95,19 +95,19 @@
   .modes button {
     background: var(--panel2); color: var(--text-dim);
     border: 1px solid var(--border); border-radius: 4px; padding: 5px 10px;
-    cursor: pointer; font-size: 12px;
+    cursor: pointer; font-size: 13px;
   }
   .modes button.active { color: var(--text); border-color: var(--accent); background: rgba(78,161,255,.15); }
-  .clamp { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .clamp { display: flex; align-items: center; gap: 8px; font-size: 13px; }
   .clamp input[type=range] { width: 140px; accent-color: var(--accent); }
   .clamp .val { font-family: ui-monospace, monospace; min-width: 64px; text-align: right; }
-  .pointsize { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .pointsize { display: flex; align-items: center; gap: 6px; font-size: 13px; }
   .pointsize input[type=range] { width: 80px; accent-color: var(--accent); }
 
   .legend {
     position: absolute; right: 12px; bottom: 12px;
     background: rgba(22,26,34,.92); border: 1px solid var(--border);
-    border-radius: 6px; padding: 10px 12px; font-size: 11px;
+    border-radius: 6px; padding: 10px 12px; font-size: 12px;
     pointer-events: auto; min-width: 180px;
   }
   .legend .title { color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
@@ -117,7 +117,7 @@
   .stats {
     position: absolute; left: 12px; bottom: 12px;
     background: rgba(22,26,34,.92); border: 1px solid var(--border);
-    border-radius: 6px; padding: 10px 12px; font-size: 11px;
+    border-radius: 6px; padding: 10px 12px; font-size: 12px;
     pointer-events: auto; min-width: 220px;
   }
   .stats .title { color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
@@ -125,13 +125,13 @@
   .stats td { padding: 1px 8px 1px 0; font-family: ui-monospace, monospace; }
   .stats td.k { color: var(--text-dim); }
 
-  .empty { color: var(--text-dim); padding: 20px; text-align: center; font-size: 12px; }
+  .empty { color: var(--text-dim); padding: 20px; text-align: center; font-size: 13px; }
 
   /* Tilt analysis panel (right-docked, collapsible) */
   .tilt-toggle {
     background: var(--panel2); color: var(--text-dim);
     border: 1px solid var(--border); border-radius: 4px; padding: 5px 10px;
-    cursor: pointer; font-size: 12px;
+    cursor: pointer; font-size: 13px;
   }
   .tilt-toggle.active { color: var(--text); border-color: var(--accent); background: rgba(78,161,255,.15); }
   .tilt-panel {
@@ -143,36 +143,58 @@
   }
   .tilt-panel.open { display: block; }
   .tilt-panel h3 {
-    margin: 0 0 8px 0; font-size: 12px; color: var(--text-dim);
+    margin: 0 0 8px 0; font-size: 13px; color: var(--text-dim);
     font-weight: 500; text-transform: uppercase; letter-spacing: .5px;
   }
-  .tilt-panel .empty-msg { color: var(--text-dim); font-size: 12px; padding: 10px 0; }
+  .tilt-panel .empty-msg { color: var(--text-dim); font-size: 13px; padding: 10px 0; }
   .tilt-card {
     background: var(--panel2); border: 1px solid var(--border); border-radius: 5px;
     padding: 10px 12px; margin-bottom: 10px;
   }
   .tilt-card .pair {
-    font-size: 11px; color: var(--text-dim); margin-bottom: 4px;
+    font-size: 12px; color: var(--text-dim); margin-bottom: 4px;
   }
   .tilt-card .pair b { color: var(--text); font-weight: 600; }
   .tilt-headline {
-    font-size: 22px; font-family: ui-monospace, monospace;
+    font-size: 26px; font-family: ui-monospace, monospace;
     font-weight: 700; margin: 6px 0 2px 0;
   }
   .tilt-headline.outward { color: var(--err); }
   .tilt-headline.inward  { color: var(--accent); }
   .tilt-headline.nochange { color: var(--text-dim); }
+  /* 절대 기울기 (수직 대비) — 변화량보다 위에 표시되는 메인 지표 */
+  .tilt-abs {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 5px;
+    padding: 8px 10px; margin: 6px 0 10px 0;
+  }
+  .tilt-abs-row { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+  .tilt-abs-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  .tilt-abs-main { margin-top: 2px; }
+  .tilt-abs-num {
+    font-size: 30px; font-family: ui-monospace, monospace; font-weight: 700;
+  }
+  .tilt-abs-num.out { color: var(--err); }
+  .tilt-abs-num.in  { color: var(--accent); }
+  .tilt-abs-dir { font-size: 11px; font-weight: 600; color: var(--text-dim); letter-spacing: .5px; }
+  .tilt-abs-sub { color: var(--text-dim); font-size: 11px; margin-left: auto; }
+  .tilt-abs-prev { color: var(--text-dim); font-family: ui-monospace, monospace; margin-top: 4px; }
+  .tilt-abs-iqr { opacity: .7; margin-left: 4px; }
+  .tilt-section-label {
+    font-size: 11px; color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: .5px; margin-top: 4px;
+  }
+  .tilt-section-label em { font-style: normal; color: var(--text); font-weight: 600; }
   .tilt-ci {
-    font-size: 11px; color: var(--text-dim); font-family: ui-monospace, monospace;
+    font-size: 12px; color: var(--text-dim); font-family: ui-monospace, monospace;
   }
   .tilt-verdict {
-    margin-top: 6px; padding: 4px 6px; border-radius: 3px; font-size: 11px;
+    margin-top: 6px; padding: 4px 6px; border-radius: 3px; font-size: 12px;
     text-align: center;
   }
   .tilt-verdict.sig { background: rgba(248,113,113,.15); color: var(--err); border: 1px solid rgba(248,113,113,.4); }
   .tilt-verdict.nosig { background: rgba(74,222,128,.12); color: var(--ok); border: 1px solid rgba(74,222,128,.4); }
   .tilt-metrics {
-    display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 11px;
+    display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 12px;
     font-family: ui-monospace, monospace; margin-top: 8px;
   }
   .tilt-metrics .k { color: var(--text-dim); }
@@ -180,19 +202,19 @@
     border-radius: 5px; padding: 8px; height: 240px; }
   .tilt-actions { display: flex; gap: 6px; margin-top: 8px; }
   .tilt-actions button {
-    flex: 1; font-size: 11px; padding: 5px 8px; border-radius: 4px; cursor: pointer;
+    flex: 1; font-size: 12px; padding: 5px 8px; border-radius: 4px; cursor: pointer;
     background: var(--panel2); color: var(--text-dim); border: 1px solid var(--border);
   }
   .tilt-actions button:hover { color: var(--text); border-color: var(--accent); }
   .tilt-warn {
     background: rgba(248,113,113,.15); color: var(--err);
     border: 1px solid rgba(248,113,113,.4); border-radius: 5px;
-    padding: 8px 10px; margin-bottom: 10px; font-size: 11px; line-height: 1.5;
+    padding: 8px 10px; margin-bottom: 10px; font-size: 12px; line-height: 1.5;
   }
   .tilt-warn b { color: #ffc1c1; }
   .tilt-3d {
     background: var(--panel2); border: 1px solid var(--border); border-radius: 5px;
-    padding: 8px 10px; margin-top: 8px; font-size: 11px;
+    padding: 8px 10px; margin-top: 8px; font-size: 12px;
   }
   .tilt-3d-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
   .tilt-3d-row label { color: var(--text-dim); min-width: 60px; }
@@ -201,7 +223,7 @@
   .tilt-3d-row .swatch {
     display: inline-block; width: 12px; height: 3px; vertical-align: middle;
   }
-  .tilt-3d-legend { display: flex; gap: 12px; font-size: 10px; color: var(--text-dim); margin-top: 4px; }
+  .tilt-3d-legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
 
   .spinner {
     display: inline-block; width: 10px; height: 10px; border-radius: 50%;
@@ -264,7 +286,7 @@
     <div class="bar" id="legend-bar"></div>
     <div class="ticks" id="legend-ticks"><span>-0.050</span><span>0</span><span>+0.050</span></div>
   </div>
-  <div class="point-tooltip" id="point-tooltip" style="display:none;position:absolute;pointer-events:none;background:rgba(0,0,0,.85);color:#eee;padding:6px 10px;border-radius:4px;font-size:12px;line-height:1.5;white-space:nowrap;z-index:10;border:1px solid rgba(255,255,255,.15);"></div>
+  <div class="point-tooltip" id="point-tooltip" style="display:none;position:absolute;pointer-events:none;background:rgba(0,0,0,.85);color:#eee;padding:6px 10px;border-radius:4px;font-size:13px;line-height:1.5;white-space:nowrap;z-index:10;border:1px solid rgba(255,255,255,.15);"></div>
   <div class="stats" id="stats" style="display:none">
     <div class="title">통계</div>
     <table id="stats-tbl"></table>
