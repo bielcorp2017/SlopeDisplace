@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 // ---- State ----
 const state = {
   dataset: null,
+  group: "",              // scan group: "" = default (date-only), "all" = *_all.ply, etc.
   files: [],
   referenceName: null,
   selectedStem: null,
@@ -359,14 +360,39 @@ async function loadDatasets() {
   if (r.datasets.length) {
     state.dataset = r.datasets[0];
     sel.value = state.dataset;
+    await loadGroups();
     await loadFiles();
   }
+}
+
+async function loadGroups() {
+  const r = await fetch(`/api/groups?dataset=${encodeURIComponent(state.dataset)}`).then(r => r.json());
+  const sel = $("group");
+  sel.innerHTML = "";
+  const groups = r.groups || [];
+  if (groups.length <= 1) {
+    // Only default group — hide selector
+    sel.style.display = "none";
+    state.group = groups[0] || "";
+    return;
+  }
+  sel.style.display = "";
+  const labels = { "": "기본 스캔", "all": "전체 스캔 (all)" };
+  for (const g of groups) {
+    const opt = document.createElement("option");
+    opt.value = g;
+    opt.textContent = labels[g] || g;
+    sel.appendChild(opt);
+  }
+  state.group = groups[0] || "";
+  sel.value = state.group;
 }
 
 async function loadFiles() {
   const tbody = $("files");
   tbody.innerHTML = "";
-  const r = await fetch(`/api/files?dataset=${encodeURIComponent(state.dataset)}`).then(r=>r.json());
+  const groupParam = state.group ? `&group=${encodeURIComponent(state.group)}` : "";
+  const r = await fetch(`/api/files?dataset=${encodeURIComponent(state.dataset)}${groupParam}`).then(r=>r.json());
   state.files = r.files;
   state.referenceName = r.reference;
   if (!r.files.length) { $("empty").style.display = "block"; return; }
@@ -537,7 +563,7 @@ async function runPreprocess(filename, btn) {
   logJob(`전처리 시작: ${filename}`);
   try {
     const r = await fetch(
-      `/api/preprocess?dataset=${encodeURIComponent(state.dataset)}&filename=${encodeURIComponent(filename)}`,
+      `/api/preprocess?dataset=${encodeURIComponent(state.dataset)}&filename=${encodeURIComponent(filename)}${state.group ? "&group=" + encodeURIComponent(state.group) : ""}`,
       { method: "POST" }
     ).then(r => r.json());
     if (!r.job_id) throw new Error("no job_id");
@@ -725,8 +751,42 @@ function renderTilt(t) {
   const tgtAbs = t.target_absolute_tilt_deg;
   const refAbsIqr = t.reference_absolute_tilt_iqr_deg;
   const hasAbs = (typeof refAbs === "number") && (typeof tgtAbs === "number");
+
+  // 상/하부 2단 구성 — 상부(수직 설계부)만의 기울기를 메인으로 표시
+  const sec = t.wall_sections;
+  const hasSec = !!(sec && sec.detected && sec.upper);
+  const upTgt = hasSec
+    ? (typeof sec.upper.target_tilt_deg === "number"
+        ? sec.upper.target_tilt_deg
+        : sec.upper.tilt_deg + t.tilt_change_deg)
+    : null;
+  const upChg = hasSec ? sec.upper.tilt_change_deg : null;
+  const secHtml = hasSec ? `
+        <div class="tilt-abs-row">
+          <span class="tilt-abs-label">상부(수직 설계부) 절대 기울기 — 수직 대비</span>
+        </div>
+        <div class="tilt-abs-row tilt-abs-main">
+          <span class="tilt-abs-num ${upTgt >= 0 ? 'out' : 'in'}">${fmt(Math.abs(upTgt), 3)}°</span>
+          <span class="tilt-abs-dir">${upTgt >= 0 ? "OUTWARD" : "INWARD"}</span>
+          <span class="tilt-abs-sub">(${t.target} 기준)</span>
+        </div>
+        <div class="tilt-abs-row tilt-abs-prev">
+          기준 스캔 상부 ${fmt(Math.abs(sec.upper.tilt_deg), 3)}° ${sec.upper.tilt_deg >= 0 ? "OUT" : "IN"}
+          · 상부 변화 ${upChg !== null && upChg !== undefined ? fmt(upChg, 4, true) + "°" : fmt(t.tilt_change_deg, 4, true) + "° (전체값 대용)"}
+          <span class="tilt-abs-iqr">셀 ${sec.upper.cell_count}개 · IQR ${fmt(sec.upper.iqr_deg, 2)}°</span>
+        </div>
+        <div class="tilt-abs-row tilt-abs-prev">
+          하부(설계 경사부) ${fmt(Math.abs(sec.lower.tilt_deg), 3)}° ${sec.lower.tilt_deg >= 0 ? "OUT" : "IN"}
+          · 경계 h=${fmt(sec.split_h_m, 2)} m
+          <span class="tilt-abs-iqr">셀 ${sec.lower.cell_count}개 · IQR ${fmt(sec.lower.iqr_deg, 2)}°</span>
+        </div>
+        <div class="tilt-abs-row tilt-abs-prev" style="border-top:1px solid var(--border);margin-top:4px;padding-top:5px">
+          전체 벽면(상+하 혼합, 참고) ${fmt(Math.abs(tgtAbs), 3)}° ${tgtAbs >= 0 ? "OUT" : "IN"}
+        </div>
+  ` : "";
   const absHtml = hasAbs ? `
       <div class="tilt-abs">
+        ${hasSec ? secHtml : `
         <div class="tilt-abs-row">
           <span class="tilt-abs-label">수직 대비 절대 기울기</span>
         </div>
@@ -737,8 +797,15 @@ function renderTilt(t) {
         </div>
         <div class="tilt-abs-row tilt-abs-prev">
           이전 ${t.reference}: ${fmt(Math.abs(refAbs), 3)}° ${refAbs >= 0 ? "OUTWARD" : "INWARD"}
-          ${typeof refAbsIqr === "number" ? `<span class="tilt-abs-iqr">(per-point IQR ${fmt(refAbsIqr, 2)}°)</span>` : ""}
-        </div>
+          ${(typeof refAbsIqr === "number" && !t.abs_tilt_method) ? `<span class="tilt-abs-iqr">(per-point IQR ${fmt(refAbsIqr, 2)}°)</span>` : ""}
+        </div>`}
+        ${t.abs_tilt_method === "local_patch_planes" ? `
+        <div class="tilt-abs-row tilt-abs-prev">
+          <span class="tilt-abs-iqr">국소 패치 평면 ${t.patch_count}개 (${fmt(t.patch_cell_m, 1)} m) · 셀간 IQR ${fmt(refAbsIqr, 2)}° · 요철 RMS ${fmt(t.patch_offplane_rms_mm, 1)} mm</span>
+        </div>` : (t.abs_tilt_method === "per_point_median" ? `
+        <div class="tilt-abs-row tilt-abs-prev">
+          <span class="tilt-abs-iqr">점별 노멀 median (패치 부족 fallback)</span>
+        </div>` : "")}
       </div>
   ` : "";
 
@@ -781,6 +848,7 @@ function renderTilt(t) {
       <div class="tilt-3d-legend">실제 ${fmt(t.tilt_change_deg, 4, true)}° → 화면 ${fmt(t.tilt_change_deg * tiltExagg, 2, true)}°</div>
     </div>
     <div class="tilt-actions">
+      <button id="tilt-explain" title="복셀·평면 피팅 등 절대 기울기 계산 과정을 3D로 단계별 설명">🎓 계산 과정</button>
       <button id="tilt-recompute">재계산</button>
     </div>
   `;
@@ -854,6 +922,14 @@ function renderTilt(t) {
     await loadTilt(latest, /*recompute=*/true);
   });
 
+  // 계산 과정 설명 페이지 (새 탭) — 현재 표시된 dataset/target 기준
+  $("tilt-explain").addEventListener("click", () => {
+    if (!t.dataset || !t.target) return;
+    const url = `/explain.html?dataset=${encodeURIComponent(t.dataset)}` +
+                `&stem=${encodeURIComponent(t.target)}`;
+    window.open(url, "_blank");
+  });
+
   // 3D lines controls
   $("tilt-lines-vis").addEventListener("change", (e) => {
     tiltLinesVisible = e.target.checked;
@@ -916,8 +992,13 @@ $("tilt-toggle").addEventListener("click", () => {
 });
 
 // ---- UI events ----
-$("dataset").addEventListener("change", (e) => {
+$("dataset").addEventListener("change", async (e) => {
   state.dataset = e.target.value;
+  await loadGroups();
+  loadFiles();
+});
+$("group").addEventListener("change", (e) => {
+  state.group = e.target.value;
   loadFiles();
 });
 $("refresh").addEventListener("click", () => {

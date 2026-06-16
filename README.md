@@ -18,10 +18,22 @@ pip install fastapi uvicorn open3d numpy scipy pandas
 ```
 data/
   CH2_RETAINWALL/
-    20260511.ply    ← 기준 스캔 (가장 오래된 파일이 자동으로 reference가 됨)
-    20260512.ply    ← 비교 스캔
+    20260511.ply        ← 기준 스캔 (가장 오래된 파일이 자동으로 reference가 됨)
+    20260512.ply        ← 비교 스캔
     ...
+    20260528_all.ply    ← "all" 그룹 스캔 (전체 영역 포함)
+    20260605_all.ply
+    20260615_all.ply
 ```
+
+### 스캔 그룹
+
+동일 데이터셋 안에서 `YYYYMMDD_<suffix>.ply` 형태의 파일들은 suffix 별로 **스캔 그룹**으로 자동 분류된다.
+
+- **기본 그룹** (`""`) — `20260511.ply` 등 날짜만으로 된 파일 (옹벽 영역)
+- **all 그룹** — `20260528_all.ply` 등 전체 스캔 영역 파일
+
+각 그룹은 독립적인 레퍼런스를 가지며, 그룹 내에서만 정합/변위 비교가 수행된다. 웹 UI의 드롭다운으로 그룹을 전환할 수 있다.
 
 > 환경변수 `SLOPE_DATA_ROOT`로 데이터 경로를 변경할 수 있다 (기본값: `<project>/data`).
 
@@ -61,10 +73,11 @@ print(result)
 1. **다운샘플링** - 원본 스캔을 ~500k 포인트로 voxel downsample → `*_simple.ply`
 2. **FGR (Fast Global Registration)** - simplified 클라우드 간 초기 정합 → 변환행렬 T0
 3. **FGR 검증** - 두 스캔의 중심 거리를 계산하여 co-located 여부 판단. 같은 좌표계인데 FGR이 큰 회전(>30도)을 찾으면 identity로 fallback
-4. **Multi-scale ICP** - 원본(full) 클라우드에서 5단계 정밀 정합 (1.0m → 0.01m). 초기 스케일에서 넓은 correspondence distance(v*4.0)와 200회 iteration으로 FGR 오차 보정
-5. **ICP 품질 검증** - 최종 fitness < 0.3이면 identity init으로 재시도, 더 나은 결과 채택
-6. **변위 계산** - 정합된 타겟 vs 기준 클라우드 간 per-point displacement 산출 (signed_normal, magnitude, horizontal, vertical)
-7. **결과 저장** - `*_disp.bin` (N x 4 float32), `*_meta.json` (변환행렬, ICP 이력, 변위 통계)
+4. **Overlap 크롭** - 상호 최근접점(mutual NN) 기반으로 두 클라우드의 실제 겹치는 영역을 감지하고, 해당 영역만 ICP에 사용. 스캔 범위가 크게 다를 때 비겹침 영역이 ICP를 방해하는 것을 방지
+5. **Multi-scale ICP** - 원본(full) 클라우드에서 6단계 정밀 정합 (1.0m → 0.01m). 초기 스케일에서 넓은 correspondence distance(v*4.0)와 200회 iteration으로 FGR 오차 보정
+6. **ICP 품질 검증** - 최종 fitness < 0.3이면 identity init으로 재시도, 더 나은 결과 채택
+7. **변위 계산** - 정합된 타겟 vs 기준 클라우드 간 per-point displacement 산출 (signed_normal, magnitude, horizontal, vertical)
+8. **결과 저장** - `*_disp.bin` (N x 4 float32), `*_meta.json` (변환행렬, ICP 이력, 변위 통계)
 
 ### 전처리 결과 파일
 
@@ -110,21 +123,27 @@ rm data/CH2_RETAINWALL/20260512_rgb.bin
 
 브라우저에서 로딩 완료 후:
 
+- **그룹 전환**: 데이터셋 옆 드롭다운으로 "기본 스캔" / "전체 스캔 (all)" 선택
 - **모드 전환**: signed_normal / magnitude / horizontal / vertical / RGB
 - **Clamp 조절**: 변위 색상 범위 설정 (예: 0.05m = +/-50mm). 양쪽이 clamp 색상으로 채워지면 정합 오류 의심
 - **포인트 크기**: 슬라이더로 조절
+- **기울기 분석**: 📐 버튼으로 옹벽 기울기 변화 패널 표시 (절대 기울기, 변화량, 회귀 차트)
+- **기울기 계산 과정**: 🎓 버튼으로 복셀/평면 피팅 단계별 3D 시각화 페이지
 
 ## 5. 주요 API
 
 | Endpoint | 설명 |
 |----------|------|
 | `GET /api/datasets` | 데이터셋 목록 |
-| `GET /api/files?dataset=X` | 파일 목록 (전처리 상태 포함) |
+| `GET /api/groups?dataset=X` | 스캔 그룹 목록 (기본, all 등) |
+| `GET /api/files?dataset=X&group=G` | 파일 목록 (전처리 상태 포함). group 생략 시 기본 그룹 |
 | `GET /api/ply/{dataset}/{stem}` | simplified PLY 스트리밍 |
 | `GET /api/disp/{dataset}/{stem}` | 변위 바이너리 스트리밍 (N x 4 float32) |
 | `GET /api/rgb/{dataset}/{stem}` | RGB 바이너리 스트리밍 |
-| `POST /api/preprocess` | 비동기 전처리 시작 |
+| `POST /api/preprocess?dataset=X&filename=F&group=G` | 비동기 전처리 시작 |
 | `GET /api/job/{jid}` | 작업 상태 조회 |
+| `GET /api/wall-tilt/{dataset}/{stem}` | 옹벽 기울기 분석 결과 |
+| `GET /api/wall-tilt-debug/{dataset}/{stem}` | 기울기 계산 디버그 데이터 |
 
 ## 6. 우분투 서버 배포
 
@@ -275,12 +294,15 @@ rm data/CH2_RETAINWALL/20260512_{simple.ply,disp.bin,meta.json,rgb.bin}
 
 ```
 server/
-  app.py            FastAPI 서버
+  app.py            FastAPI 서버 (REST API, 비동기 전처리 관리)
   pipeline.py       전처리 파이프라인 (FGR + ICP + 변위 계산)
+  wall_tilt.py      옹벽 기울기 분석 (국소 패치 평면, 회귀 분석)
   inject_synthetic.py  합성 변위 데이터 생성 (개발용)
 web/
-  index.html        SPA 프론트엔드
-  app.js            Three.js 시각화
+  index.html        SPA 프론트엔드 (변위 시각화, 기울기 패널)
+  app.js            Three.js 시각화 (변위 컬러맵, 점 클릭, 기울기 3D 라인)
+  explain.html      기울기 계산 과정 단계별 3D 설명 페이지
+  explain.js        explain 페이지 로직
 cpp/
   src/pipeline.h    C++ 고속 전처리기
 data/

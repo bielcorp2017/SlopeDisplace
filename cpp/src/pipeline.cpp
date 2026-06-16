@@ -118,10 +118,18 @@ static Eigen::Matrix4d fgr_global(geometry::PointCloud& src,
     auto ft = pipelines::registration::ComputeFPFHFeature(
         *t, geometry::KDTreeSearchParamHybrid(voxel * 5.0, 100));
 
+    // FastGlobalRegistrationOption signature is
+    // (division_factor, use_absolute_scale, decrease_mu,
+    //  maximum_correspondence_distance, ...).  Passing voxel*1.5 positionally
+    // set division_factor (not the correspondence distance) and left the
+    // correspondence distance at the 0.025 default.  Set it explicitly to match
+    // the Python pipeline (maximum_correspondence_distance = voxel*1.5).
     auto result = pipelines::registration::
         FastGlobalRegistrationBasedOnFeatureMatching(
             *s, *t, *fs, *ft,
-            pipelines::registration::FastGlobalRegistrationOption(voxel * 1.5));
+            pipelines::registration::FastGlobalRegistrationOption(
+                /*division_factor=*/1.4, /*use_absolute_scale=*/false,
+                /*decrease_mu=*/true, /*maximum_correspondence_distance=*/voxel * 1.5));
 
     return result.transformation_;
 }
@@ -161,7 +169,16 @@ multiscale_icp(const PointCloudF& src_full, const PointCloudF& tgt_full,
             progress("icp", buf, static_cast<float>(si) / n_scales);
         }
 
-        auto criteria = pipelines::registration::ICPConvergenceCriteria(max_iter, 1e-7, 1e-7);
+        // NOTE: Open3D's ICPConvergenceCriteria signature is
+        // (relative_fitness, relative_rmse, max_iteration) — NOT
+        // (max_iteration, ...). Passing max_iter first set relative_fitness to a
+        // huge value (ICP stopped after one iteration) and max_iteration to 0,
+        // so ICP barely ran and stayed near the init. Order fixed below.
+        auto criteria = pipelines::registration::ICPConvergenceCriteria(1e-8, 1e-8, max_iter);
+        // Plain point-to-plane. A robust (Tukey) loss was tried here, but when a
+        // multi-cm offset still remains it down-weights the (large-residual)
+        // correct correspondences and ICP can no longer "walk" the offset — it
+        // gets stuck near the init (fitness collapses at the fine scales).
         auto result = pipelines::registration::RegistrationICP(
             *s, *t, cd, T,
             pipelines::registration::TransformationEstimationPointToPlane(),

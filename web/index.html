@@ -231,6 +231,34 @@
     animation: spin .8s linear infinite; vertical-align: middle;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Help modal */
+  .help-overlay {
+    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 99999;
+    background: rgba(0,0,0,.6); backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center;
+  }
+  .help-overlay.open { display: flex !important; }
+  .help-modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    width: 680px; max-width: 92vw; max-height: 85vh; overflow: auto;
+    padding: 28px 32px; color: var(--text); position: relative;
+  }
+  .help-modal h2 { margin: 0 0 16px; font-size: 18px; font-weight: 700; }
+  .help-modal h3 { margin: 18px 0 8px; font-size: 14px; font-weight: 600; color: var(--accent); }
+  .help-modal p, .help-modal li { font-size: 13px; line-height: 1.7; color: var(--text); }
+  .help-modal ul { padding-left: 18px; margin: 4px 0 10px; }
+  .help-modal .term { color: var(--accent); font-weight: 600; }
+  .help-modal .close-btn {
+    position: absolute; top: 12px; right: 16px; background: none; border: none;
+    color: var(--text-dim); font-size: 22px; cursor: pointer; line-height: 1;
+  }
+  .help-modal .close-btn:hover { color: var(--text); }
+  .help-modal table { width: 100%; border-collapse: collapse; margin: 8px 0 12px; }
+  .help-modal table th, .help-modal table td {
+    padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--border); text-align: left;
+  }
+  .help-modal table th { color: var(--text-dim); font-weight: 500; background: var(--panel2); }
 </style>
 </head>
 <body>
@@ -238,6 +266,7 @@
   <header>
     <h1>대산당진 3공구 천의2터널<br>옹벽 변위 분석결과</h1>
     <select id="dataset"></select>
+    <select id="group" title="스캔 그룹 선택" style="display:none"></select>
     <button id="refresh" title="파일 목록 새로고침" style="margin-left:4px;padding:2px 8px;cursor:pointer;">↻</button>
   </header>
   <div class="filelist">
@@ -275,6 +304,9 @@
     <div class="panel">
       <button id="tilt-toggle" class="tilt-toggle" title="옹벽 기울기 변화 분석 패널 열기/닫기">📐 기울기</button>
     </div>
+    <div class="panel">
+      <button id="help-btn" class="tilt-toggle" title="용어 및 분석결과 설명">❓ 도움말</button>
+    </div>
   </div>
 
   <div id="tilt-panel" class="tilt-panel">
@@ -292,6 +324,82 @@
     <table id="stats-tbl"></table>
   </div>
 </main>
+
+<div class="help-overlay" id="help-overlay">
+  <div class="help-modal">
+    <button class="close-btn" id="help-close">&times;</button>
+    <h2>용어 및 분석결과 설명</h2>
+
+    <h3>변위 모드 (상단 버튼)</h3>
+    <table>
+      <tr><th>모드</th><th>설명</th></tr>
+      <tr><td class="term">법선 (signed)</td><td>기준 표면의 법선(수직) 방향으로 측정한 부호 변위. 양수(+, 빨강)=바깥으로 밀림, 음수(-, 파랑)=안쪽으로 당겨짐. 옹벽 변위 모니터링에 가장 적합합니다.</td></tr>
+      <tr><td class="term">최소거리</td><td>대상 점과 기준 점군의 최근접점 간 유클리드 거리(부호 없음). 방향과 무관한 순수 이격 크기를 나타냅니다.</td></tr>
+      <tr><td class="term">수평</td><td>수평면(XY) 방향 변위. 법선 벡터의 XY 성분으로 투영한 부호 값입니다.</td></tr>
+      <tr><td class="term">수직</td><td>수직(Z) 방향 변위. 침하 또는 융기를 나타냅니다.</td></tr>
+      <tr><td class="term">원본</td><td>스캐너가 취득한 원래 RGB 색상을 그대로 표시합니다.</td></tr>
+    </table>
+
+    <h3>색상 범례</h3>
+    <ul>
+      <li><span class="term">± 범위 슬라이더</span> — 색상 매핑의 최대/최소값(m 단위). 값을 줄이면 미세한 변위가 강조됩니다.</li>
+      <li><span class="term">파랑→흰→빨강</span> — 부호 변위: 파랑=안쪽, 흰=변위 없음, 빨강=바깥.</li>
+      <li><span class="term">JET (파랑→초록→노랑→빨강)</span> — 최소거리 모드 전용, 0부터 클수록 빨강.</li>
+    </ul>
+
+    <h3>통계 패널 (좌하단)</h3>
+    <table>
+      <tr><th>항목</th><th>의미</th></tr>
+      <tr><td class="term">min / max</td><td>선택 채널의 최솟값/최댓값 (m)</td></tr>
+      <tr><td class="term">mean</td><td>산술 평균 변위 (부호 포함)</td></tr>
+      <tr><td class="term">abs mean</td><td>절대값 평균 — 방향 무시한 평균 이동량</td></tr>
+      <tr><td class="term">rms</td><td>제곱평균제곱근 — 변위 크기의 대표값</td></tr>
+      <tr><td class="term">p95 |·|</td><td>절대 변위의 95번째 백분위수 — 극단값 제외 최대 이동</td></tr>
+      <tr><td class="term">points</td><td>표시 중인 점의 총 개수</td></tr>
+      <tr><td class="term">ICP fit</td><td>정합(registration) 품질: fitness(겹침비율 %) 및 inlier RMSE(잔차)</td></tr>
+    </table>
+
+    <h3>기울기 분석 패널 (📐)</h3>
+    <table>
+      <tr><th>항목</th><th>의미</th></tr>
+      <tr><td class="term">절대 기울기</td><td>수직(plumb) 대비 옹벽의 현재 기울어진 정도(°). OUTWARD=바깥, INWARD=안쪽.</td></tr>
+      <tr><td class="term">기울기 변화</td><td>기준 스캔 대비 최신 스캔에서 추가로 기울어진 각도(°).</td></tr>
+      <tr><td class="term">α (mm/m)</td><td>높이 1m당 수평 변위(mm). 기울기의 기울기(회귀 기울기).</td></tr>
+      <tr><td class="term">β (mm)</td><td>기준 높이에서의 잔여 수평 변위(회귀 절편).</td></tr>
+      <tr><td class="term">95% CI</td><td>95% 신뢰구간 — 참값이 이 범위 안에 있을 확률 95%.</td></tr>
+      <tr><td class="term">잔차 σ</td><td>회귀 잔차의 로버스트 표준편차(mm). 클수록 데이터 산포가 큼.</td></tr>
+      <tr><td class="term">R²</td><td>결정계수 — 1에 가까울수록 높이-변위 관계가 선형(기울기 모델 적합).</td></tr>
+      <tr><td class="term">옹벽 점수</td><td>옹벽 면으로 분류된 점수 / 전체 점수.</td></tr>
+      <tr><td class="term">3D 라인</td><td>노랑=수직 기준선(plumb), 빨강=실제 기울어진 방향(과장 표시).</td></tr>
+    </table>
+
+    <h3>파일 상태</h3>
+    <ul>
+      <li><span class="term">기준(원본)</span> — 기준 스캔(★ 표시). 변위 계산의 기준점이 됩니다.</li>
+      <li><span class="term">정합완료</span> — 전처리 완료. 변위 데이터 조회 가능.</li>
+      <li><span class="term">단순화됨</span> — 다운샘플링만 완료. 변위 미계산.</li>
+      <li><span class="term">원본만</span> — 미처리 .pts 파일. "전처리" 버튼으로 처리 시작.</li>
+    </ul>
+
+    <h3>조작 방법</h3>
+    <ul>
+      <li><b>회전</b>: 마우스 왼쪽 드래그</li>
+      <li><b>이동(Pan)</b>: 마우스 오른쪽 드래그 또는 Ctrl+왼쪽 드래그</li>
+      <li><b>줌</b>: 마우스 휠</li>
+      <li><b>점 클릭</b>: 해당 점의 변위값 상세 툴팁 표시</li>
+    </ul>
+  </div>
+</div>
+<script>
+(function(){
+  var btn = document.getElementById('help-btn');
+  var overlay = document.getElementById('help-overlay');
+  var closeBtn = document.getElementById('help-close');
+  btn.addEventListener('click', function(){ overlay.classList.add('open'); });
+  closeBtn.addEventListener('click', function(){ overlay.classList.remove('open'); });
+  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.classList.remove('open'); });
+})();
+</script>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script type="importmap">

@@ -80,12 +80,18 @@ def list_datasets():
 
 
 @app.get("/api/files")
-def list_files(dataset: str):
-    rows = pipeline.list_scan_files(dataset)
+def list_files(dataset: str, group: str = ""):
+    rows = pipeline.list_scan_files(dataset, group=group)
     if not rows:
-        return {"dataset": dataset, "files": [], "reference": None}
+        return {"dataset": dataset, "group": group, "files": [], "reference": None}
     # The first (oldest by filename) is the reference.
-    return {"dataset": dataset, "files": rows, "reference": rows[0]["name"]}
+    return {"dataset": dataset, "group": group, "files": rows, "reference": rows[0]["name"]}
+
+
+@app.get("/api/groups")
+def list_groups(dataset: str):
+    groups = pipeline.list_groups(dataset)
+    return {"dataset": dataset, "groups": groups}
 
 
 @app.get("/api/meta/{dataset}/{stem}")
@@ -101,7 +107,10 @@ def get_ply(dataset: str, stem: str):
     p = DATA_ROOT / dataset / f"{stem}_simple.ply"
     if not p.is_file():
         raise HTTPException(404, f"ply not found: {stem}")
-    return FileResponse(p, media_type="application/octet-stream")
+    # no-cache: browser must revalidate (ETag/Last-Modified) before reusing, so a
+    # re-preprocessed cloud is never served stale from the browser disk cache.
+    return FileResponse(p, media_type="application/octet-stream",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/disp/{dataset}/{stem}")
@@ -109,7 +118,8 @@ def get_disp(dataset: str, stem: str):
     p = DATA_ROOT / dataset / f"{stem}_disp.bin"
     if not p.is_file():
         raise HTTPException(404, f"disp not found: {stem}")
-    return FileResponse(p, media_type="application/octet-stream")
+    return FileResponse(p, media_type="application/octet-stream",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/rgb/{dataset}/{stem}")
@@ -123,11 +133,12 @@ def get_rgb(dataset: str, stem: str):
             pipeline.extract_rgb_for_simple(dataset, stem)
         except FileNotFoundError as e:
             raise HTTPException(404, f"source not found: {e}")
-    return FileResponse(rgb_path, media_type="application/octet-stream")
+    return FileResponse(rgb_path, media_type="application/octet-stream",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/api/preprocess")
-def start_preprocess(dataset: str, filename: str):
+def start_preprocess(dataset: str, filename: str, group: str = ""):
     folder = DATA_ROOT / dataset
     if not (folder / filename).is_file():
         raise HTTPException(404, f"file not found: {filename}")
@@ -168,7 +179,8 @@ def start_preprocess(dataset: str, filename: str):
     def worker_python(use_existing_jid: bool = True):
         """Python pipeline 으로 전처리 (fallback 으로도 호출됨)."""
         try:
-            result = pipeline.preprocess(dataset, filename, progress=progress)
+            result = pipeline.preprocess(dataset, filename, group=group,
+                                         progress=progress)
             _update_job(
                 jid, status="done", stage="done", detail="",
                 finished=time.time(), result=result,
@@ -221,7 +233,7 @@ def start_preprocess(dataset: str, filename: str):
             _update_job(jid, status="error", stage="error",
                         detail=str(e), finished=time.time(), error=str(e))
 
-    worker = worker_cpp if _CPP_EXE else worker_python
+    worker = worker_cpp if (_CPP_EXE and not group) else worker_python
     threading.Thread(target=worker, daemon=True).start()
     return {"job_id": jid}
 
@@ -249,6 +261,23 @@ def get_wall_tilt(dataset: str, stem: str, recompute: bool = False):
     except ValueError as e:
         raise HTTPException(400, str(e))
     wt.save_result(result, cache)
+    return JSONResponse(result)
+
+
+@app.get("/api/wall-tilt-debug/{dataset}/{stem}")
+def get_wall_tilt_debug(dataset: str, stem: str, recompute: bool = False):
+    """계산 과정 시각화용 복셀/평면 디버그 데이터 — 없으면 즉석 계산."""
+    folder = DATA_ROOT / dataset
+    cache = folder / f"wall_tilt_debug_{stem}.json"
+    if cache.is_file() and not recompute:
+        return JSONResponse(json.loads(cache.read_text(encoding="utf-8")))
+    try:
+        result = wt.compute_wall_tilt_debug(dataset, stem, data_root=DATA_ROOT)
+    except FileNotFoundError as e:
+        raise HTTPException(404, f"prerequisite missing: {e}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    cache.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
     return JSONResponse(result)
 
 

@@ -25,13 +25,19 @@ from scipy.spatial import cKDTree
 
 DATA_ROOT = Path(os.environ.get("SLOPE_DATA_ROOT", Path(__file__).resolve().parent.parent / "data"))
 TARGET_POINTS = 500_000
-ICP_VOXELS = (1.0, 0.4, 0.1, 0.05, 0.01)
+ICP_VOXELS = (1.0, 0.4, 0.1, 0.05, 0.02, 0.01)
 
 
 # ---------- I/O ----------
 
-def list_scan_files(dataset: str) -> list[dict]:
-    """List raw scan files (.ply, excluding *_simple.ply) in a dataset folder."""
+def list_scan_files(dataset: str, group: str = "") -> list[dict]:
+    """List raw scan files (.ply, excluding *_simple.ply) in a dataset folder.
+
+    ``group`` selects which PLY naming convention to list:
+      - ``""`` (default): date-only stems like ``20260522.ply``
+      - ``"all"``: stems ending with ``_all`` like ``20260522_all.ply``
+      - any other suffix: stems ending with ``_<suffix>``
+    """
     folder = DATA_ROOT / dataset
     if not folder.is_dir():
         return []
@@ -39,10 +45,14 @@ def list_scan_files(dataset: str) -> list[dict]:
     for p in sorted(folder.glob("*.ply")):
         if p.stem.endswith("_simple"):
             continue  # skip downsampled files
-        # 파일명에 '_' 가 있는 변형(예: 20260522_tripod.ply, 20260522_rod_inliers.ply) 은
-        # 옹벽 모니터링 대상이 아니므로 목록에서 제외 — 날짜만으로 된 stem 만 표시
-        if "_" in p.stem:
-            continue
+        if group:
+            # Only include files whose stem ends with _<group>
+            if not p.stem.endswith(f"_{group}"):
+                continue
+        else:
+            # Default: date-only stems (no underscores)
+            if "_" in p.stem:
+                continue
         stem = p.stem
         simple = folder / f"{stem}_simple.ply"
         meta = folder / f"{stem}_meta.json"
@@ -59,6 +69,36 @@ def list_scan_files(dataset: str) -> list[dict]:
         })
     rows.sort(key=lambda r: r["stem"])
     return rows
+
+
+def list_groups(dataset: str) -> list[str]:
+    """Return available scan groups in a dataset folder.
+
+    A group is defined by the suffix after ``_`` in PLY filenames.
+    Only suffixes that appear on 2+ files are considered real groups.
+    The default group (date-only stems) is represented as ``""``.
+    """
+    folder = DATA_ROOT / dataset
+    if not folder.is_dir():
+        return []
+    group_counts: dict[str, int] = {}
+    has_default = False
+    for p in sorted(folder.glob("*.ply")):
+        if p.stem.endswith("_simple"):
+            continue
+        if "_" not in p.stem:
+            has_default = True
+        else:
+            parts = p.stem.split("_", 1)
+            suffix = parts[1]
+            group_counts[suffix] = group_counts.get(suffix, 0) + 1
+    result = []
+    if has_default:
+        result.append("")
+    for g in sorted(group_counts):
+        if group_counts[g] >= 2:
+            result.append(g)
+    return result
 
 
 def load_scan(path: Path, with_rgb: bool = False) -> o3d.geometry.PointCloud:
@@ -149,17 +189,80 @@ def fgr_global(src_simple: o3d.geometry.PointCloud,
     return np.asarray(res.transformation)
 
 
+def _crop_to_overlap(src: o3d.geometry.PointCloud,
+                     tgt: o3d.geometry.PointCloud,
+                     margin: float = 2.0):
+    """Crop both clouds to the geometrically overlapping region.
+
+    Uses mutual nearest-neighbor search on coarse downsamples to find the
+    region where both clouds have close correspondences.  This correctly
+    handles cases where one scan covers a much wider area (e.g. includes
+    ground that the other scan doesn't) — pure bounding-box intersection
+    fails in such cases because the smaller cloud is already inside the
+    larger one's bbox.
+    Returns (src_crop, tgt_crop).
+    """
+    # Coarse downsample for fast NN search
+    coarse_voxel = 0.5
+    src_ds = src.voxel_down_sample(coarse_voxel)
+    tgt_ds = tgt.voxel_down_sample(coarse_voxel)
+    src_ds_pts = np.asarray(src_ds.points)
+    tgt_ds_pts = np.asarray(tgt_ds.points)
+
+    # Find which coarse source points have a close target neighbor
+    nn_threshold = 2.0  # meters
+    tgt_tree = cKDTree(tgt_ds_pts)
+    d_s2t, _ = tgt_tree.query(src_ds_pts, k=1, workers=-1)
+    src_good = src_ds_pts[d_s2t < nn_threshold]
+
+    src_tree = cKDTree(src_ds_pts)
+    d_t2s, _ = src_tree.query(tgt_ds_pts, k=1, workers=-1)
+    tgt_good = tgt_ds_pts[d_t2s < nn_threshold]
+
+    if len(src_good) < 100 or len(tgt_good) < 100:
+        return src, tgt
+
+    # Overlap bbox from the mutual-NN points
+    all_good = np.vstack([src_good, tgt_good])
+    lo = all_good.min(axis=0) - margin
+    hi = all_good.max(axis=0) + margin
+
+    src_pts = np.asarray(src.points)
+    tgt_pts = np.asarray(tgt.points)
+    src_mask = np.all((src_pts >= lo) & (src_pts <= hi), axis=1)
+    tgt_mask = np.all((tgt_pts >= lo) & (tgt_pts <= hi), axis=1)
+
+    if src_mask.sum() < 1000 or tgt_mask.sum() < 1000:
+        return src, tgt
+
+    return (src.select_by_index(np.where(src_mask)[0]),
+            tgt.select_by_index(np.where(tgt_mask)[0]))
+
+
 def multiscale_icp(src: o3d.geometry.PointCloud,
                    tgt: o3d.geometry.PointCloud,
                    init_T: np.ndarray,
                    voxels=ICP_VOXELS,
-                   progress=None):
+                   progress=None,
+                   crop_overlap: bool = True):
     T = np.asarray(init_T, dtype=np.float64).copy()
     history = []
     n_scales = len(voxels)
+
+    # Crop both clouds to their overlapping bounding box so that
+    # regions visible in only one scan don't mislead ICP.
+    if crop_overlap:
+        src_icp, tgt_icp = _crop_to_overlap(src, tgt)
+        if progress and len(src_icp.points) < len(src.points):
+            progress("icp_crop",
+                     f"cropped to overlap: src {len(src.points):,}->{len(src_icp.points):,}, "
+                     f"tgt {len(tgt.points):,}->{len(tgt_icp.points):,}")
+    else:
+        src_icp, tgt_icp = src, tgt
+
     for i, v in enumerate(voxels):
-        s = src.voxel_down_sample(v)
-        t = tgt.voxel_down_sample(v)
+        s = src_icp.voxel_down_sample(v)
+        t = tgt_icp.voxel_down_sample(v)
         s.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 2.0, max_nn=30))
         t.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 2.0, max_nn=30))
         # Coarse scales get wider correspondence search and more iterations
@@ -170,15 +273,20 @@ def multiscale_icp(src: o3d.geometry.PointCloud,
         else:
             cd = v * 2.0
             max_iter = 100
+        # Plain point-to-plane. A robust (Tukey) loss was tried here, but when a
+        # multi-cm offset still remains it down-weights the (large-residual)
+        # correct correspondences and ICP can no longer "walk" the offset — it
+        # gets stuck near the init (fitness collapses at the fine scales).
+        estimation = o3d.pipelines.registration.TransformationEstimationPointToPlane()
         if progress:
             progress("icp", f"scale {i+1}/{n_scales}, voxel={v}m, cd={cd:.2f}m, pts={len(s.points):,}")
         res = o3d.pipelines.registration.registration_icp(
             s, t,
             max_correspondence_distance=cd,
             init=T,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            estimation_method=estimation,
             criteria=o3d.pipelines.registration.ICPConvergenceCriteria(
-                max_iteration=max_iter, relative_fitness=1e-7, relative_rmse=1e-7
+                max_iteration=max_iter, relative_fitness=1e-8, relative_rmse=1e-8
             ),
         )
         T = np.asarray(res.transformation)
@@ -252,9 +360,12 @@ def compute_displacement(current_simple: o3d.geometry.PointCloud,
 
 # ---------- Top-level orchestration ----------
 
-def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
+def preprocess(dataset: str, target_file: str, *, group: str = "",
+               progress=None) -> dict:
     """Run the full preprocess pipeline for `target_file` against the oldest
     scan .ply in the dataset folder.
+
+    ``group`` selects the scan group (e.g. ``"all"`` for ``*_all.ply``).
 
     `progress(stage:str, detail:str)` is called periodically for UI updates.
     """
@@ -267,7 +378,7 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
     if not target_path.is_file():
         raise FileNotFoundError(target_path)
 
-    listing = list_scan_files(dataset)
+    listing = list_scan_files(dataset, group=group)
     if not listing:
         raise RuntimeError(f"No scan .ply files in {folder}")
     ref_entry = listing[0]
@@ -372,34 +483,63 @@ def preprocess(dataset: str, target_file: str, *, progress=None) -> dict:
         _p("fgr_ok", f"FGR rotation {fgr_angle:.1f}°, center dist {center_dist:.1f}m")
         T0_used = T0
 
-    # --- Multi-scale ICP on the originals, init=T0 ---
-    _p("icp", f"voxels={ICP_VOXELS}")
-    s = time.time()
-    T_final, history = multiscale_icp(tgt_pcd_full, ref_pcd_full, T0_used, voxels=ICP_VOXELS, progress=_p)
-    timing["icp"] = time.time() - s
+    # --- Multi-scale ICP: try multiple initializations, keep best ---
+    # Symmetric walls can cause FGR to return 180° flips that ICP refines to high
+    # fitness but wrong alignment.  We build candidate inits and compare results,
+    # preferring small-rotation solutions when fitness is similar.
+    candidates = []  # list of (label, init_T)
 
-    # --- If ICP fitness is poor and we used FGR, retry with identity init ---
-    final_fitness = history[-1]["fitness"] if history else 0.0
-    if final_fitness < MIN_ICP_FITNESS and fgr_accepted:
-        _p("icp_retry",
-           f"ICP fitness {final_fitness:.4f} < {MIN_ICP_FITNESS}, "
-           f"retrying with identity init")
+    candidates.append(("fgr", T0_used))
+
+    if not np.allclose(T0_used, np.eye(4)):
+        candidates.append(("identity", np.eye(4, dtype=np.float64)))
+
+    # When FGR rotation is large (~180°), the wall's symmetry likely caused a
+    # flip.  Compose FGR with a 180° rotation around Z to create a corrected
+    # candidate that preserves the spatial translation but fixes the flip.
+    if fgr_angle > 90.0:
+        Rz_180 = np.eye(4, dtype=np.float64)
+        Rz_180[0, 0] = -1.0
+        Rz_180[1, 1] = -1.0
+        T_corrected = T0 @ Rz_180  # flip source orientation before FGR mapping
+        candidates.append(("fgr_zflip", T_corrected))
+
+    best_T = None
+    best_hist = None
+    best_fit = -1.0
+    best_label = ""
+    best_rot = 999.0
+    for label, init_T in candidates:
+        _p("icp", f"voxels={ICP_VOXELS} ({label} init)")
         s = time.time()
-        T_retry, history_retry = multiscale_icp(
-            tgt_pcd_full, ref_pcd_full, np.eye(4, dtype=np.float64),
-            voxels=ICP_VOXELS, progress=_p)
-        timing["icp_retry"] = time.time() - s
-        retry_fitness = history_retry[-1]["fitness"] if history_retry else 0.0
-        if retry_fitness > final_fitness:
-            _p("icp_retry_accepted",
-               f"Identity-init fitness {retry_fitness:.4f} > FGR-init {final_fitness:.4f}, using retry")
-            T_final = T_retry
-            history = history_retry
-            T0_used = np.eye(4, dtype=np.float64)
-            final_fitness = retry_fitness
-        else:
-            _p("icp_retry_rejected",
-               f"Identity-init fitness {retry_fitness:.4f} <= FGR-init {final_fitness:.4f}, keeping original")
+        T_cand, hist_cand = multiscale_icp(
+            tgt_pcd_full, ref_pcd_full, init_T, voxels=ICP_VOXELS, progress=_p)
+        timing[f"icp_{label}"] = time.time() - s
+        fit_cand = hist_cand[-1]["fitness"] if hist_cand else 0.0
+        rot_cand = _rotation_angle_deg(T_cand)
+        _p("icp_result", f"{label}: fitness={fit_cand:.4f}, rotation={rot_cand:.1f}°")
+
+        # Prefer: (1) high fitness, (2) small final rotation (for monitoring,
+        # correct alignment should be near-identity).  If fitness difference
+        # is within 5%, prefer the smaller rotation.
+        is_better = False
+        if best_T is None:
+            is_better = True
+        elif fit_cand > best_fit * 1.05:
+            # Clearly better fitness
+            is_better = True
+        elif fit_cand >= best_fit * 0.95 and rot_cand < best_rot:
+            # Similar fitness but smaller rotation — likely correct alignment
+            is_better = True
+
+        if is_better:
+            best_T, best_hist, best_fit = T_cand, hist_cand, fit_cand
+            best_label, best_rot = label, rot_cand
+
+    _p("icp_select", f"selected {best_label}: fitness={best_fit:.4f}, rotation={best_rot:.1f}°")
+    T_final, history, final_fitness = best_T, best_hist, best_fit
+    if best_label != "fgr":
+        T0_used = candidates[[c[0] for c in candidates].index(best_label)][1]
 
     # --- Warn if final fitness is still low ---
     if final_fitness < MIN_ICP_FITNESS:

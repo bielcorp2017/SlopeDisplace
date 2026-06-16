@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>옹벽 절대 기울기 — 계산 과정 설명</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a22; --panel2: #1d222c; --border: #2a3140;
+    --text: #e6e8eb; --text-dim: #98a0ad; --accent: #4ea1ff;
+    --ok: #4ade80; --warn: #facc15; --err: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: grid; grid-template-columns: 380px 1fr; grid-template-rows: 100vh;
+    height: 100vh; width: 100vw; overflow: hidden;
+  }
+  /* 좌측 설명 패널 */
+  .side {
+    background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0; overflow: auto;
+  }
+  .side header {
+    padding: 14px 18px 12px; border-bottom: 1px solid var(--border);
+  }
+  .side header h1 { font-size: 16px; margin: 0 0 4px; font-weight: 700; }
+  .side header .sub { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, monospace; }
+  .side header a { color: var(--accent); text-decoration: none; font-size: 12px; }
+  .side header a:hover { text-decoration: underline; }
+
+  .steps { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .step {
+    display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px;
+    border-radius: 6px; cursor: pointer; margin-bottom: 2px;
+  }
+  .step:hover { background: var(--panel2); }
+  .step.active { background: rgba(78,161,255,.15); border: 1px solid var(--accent); }
+  .step:not(.active) { border: 1px solid transparent; }
+  .step .num {
+    flex: 0 0 22px; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--panel2); color: var(--text-dim); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+  }
+  .step.active .num { background: var(--accent); color: #06101f; border-color: var(--accent); }
+  .step .lbl { font-size: 13px; font-weight: 600; }
+  .step .lbl small { display: block; font-weight: 400; color: var(--text-dim); font-size: 11px; margin-top: 1px; }
+
+  .narration { padding: 14px 18px; flex: 1; }
+  .narration h2 { font-size: 14px; margin: 0 0 8px; color: var(--accent); }
+  .narration p { font-size: 13px; margin: 0 0 10px; color: var(--text); }
+  .narration .formula {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 5px;
+    padding: 8px 10px; font-family: ui-monospace, monospace; font-size: 12px;
+    color: var(--text); margin: 8px 0;
+  }
+  .narration .nums {
+    display: grid; grid-template-columns: auto 1fr; gap: 3px 10px;
+    font-family: ui-monospace, monospace; font-size: 12px; margin-top: 8px;
+  }
+  .narration .nums .k { color: var(--text-dim); }
+  .narration .hl { color: var(--warn); font-weight: 600; }
+
+  .navbtns { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); }
+  .navbtns button {
+    flex: 1; padding: 8px; border-radius: 5px; cursor: pointer; font-size: 13px;
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+  }
+  .navbtns button:hover:not(:disabled) { border-color: var(--accent); }
+  .navbtns button:disabled { opacity: .4; cursor: default; }
+
+  /* 우측 3D */
+  .view { position: relative; min-width: 0; min-height: 0; }
+  #canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+  .overlay-msg {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-size: 14px; text-align: center; padding: 20px;
+  }
+  .legend {
+    position: absolute; right: 14px; bottom: 14px;
+    background: rgba(22,26,34,.92); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; font-size: 12px; min-width: 190px;
+    display: none;
+  }
+  .legend.show { display: block; }
+  .legend .title { color: var(--text-dim); margin-bottom: 6px; }
+  .legend .bar { height: 14px; border-radius: 3px; margin-bottom: 4px; }
+  .legend .ticks { display: flex; justify-content: space-between; font-family: ui-monospace, monospace; }
+  .legend .swatches { display: flex; flex-direction: column; gap: 3px; }
+  .legend .sw { display: flex; align-items: center; gap: 6px; }
+  .legend .sw i { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .hint {
+    position: absolute; left: 14px; bottom: 14px; color: var(--text-dim);
+    font-size: 11px; background: rgba(22,26,34,.8); border: 1px solid var(--border);
+    border-radius: 5px; padding: 6px 10px;
+  }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+    border: 2px solid rgba(78,161,255,.3); border-top-color: var(--accent);
+    animation: spin .8s linear infinite; vertical-align: middle; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<aside class="side">
+  <header>
+    <h1>옹벽 절대 기울기 — 계산 과정</h1>
+    <div class="sub" id="pair">—</div>
+    <a href="/" >← 분석 화면으로</a>
+  </header>
+  <div class="steps" id="steps"></div>
+  <div class="narration" id="narration">
+    <p><span class="spinner"></span>데이터 불러오는 중...</p>
+  </div>
+  <div class="navbtns">
+    <button id="prev">← 이전</button>
+    <button id="next">다음 →</button>
+  </div>
+</aside>
+
+<main class="view">
+  <canvas id="canvas"></canvas>
+  <div class="overlay-msg" id="overlay" style="display:none"></div>
+  <div class="legend" id="legend"></div>
+  <div class="hint">회전: 드래그 · 이동: 우클릭 드래그 · 줌: 휠</div>
+</main>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="/explain.js"></script>
+</body>
+</html>
